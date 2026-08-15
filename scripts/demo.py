@@ -18,12 +18,13 @@ import argparse
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-import psycopg
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hapax.postgres import PostgresTaskStore
-from hapax.task import TaskState
 from hapax.worker import ensure_ledger
+from naive_worker import ensure_naive_ledger
 
 # --- tiny ANSI helpers so the demo reads well in a terminal or a GIF ----------
 BOLD = "\033[1m"
@@ -51,13 +52,6 @@ def bad(text: str) -> None:
     print(f"  {RED}✗ {text}{RESET}")
 
 
-NAIVE_DDL = """
-CREATE TABLE IF NOT EXISTS naive_ledger (
-    id serial PRIMARY KEY, customer text NOT NULL, amount integer NOT NULL
-);
-"""
-
-
 def _run_worker(conninfo, task_id, *, crash_at=None):
     cmd = [
         sys.executable, "-m", "hapax.worker",
@@ -66,6 +60,26 @@ def _run_worker(conninfo, task_id, *, crash_at=None):
     if crash_at:
         cmd += ["--crash-at", crash_at]
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _run_naive_worker(conninfo, task_id, *, crash_at=None):
+    cmd = [
+        sys.executable, str(Path(__file__).resolve().parent / "naive_worker.py"),
+        "--conninfo", conninfo, "--task-id", task_id,
+    ]
+    if crash_at:
+        cmd += ["--crash-at", crash_at]
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _naive_total(store, task_id):
+    with store._conn.cursor() as cur:
+        cur.execute(
+            "SELECT coalesce(sum(amount),0) AS s FROM naive_ledger WHERE task_id=%s", [task_id]
+        )
+        s = cur.fetchone()["s"]
+    store._conn.commit()
+    return s
 
 
 def _ledger_total(store, task_id):
@@ -88,30 +102,30 @@ def main() -> None:
 
     store = PostgresTaskStore(args.conninfo)
     ensure_ledger(store)
+    ensure_naive_ledger(store._conn)
     with store._conn.cursor() as cur:
-        cur.execute(NAIVE_DDL)
         cur.execute("TRUNCATE tasks, ledger, naive_ledger")
     store._conn.commit()
 
-    print(f"{BOLD}hapax — crash-durability demo{RESET}")
+    print(f"{BOLD}Hapax — crash-durability demo{RESET}")
     print(f"{DIM}An agent charges a customer $50. The worker gets kill -9'd mid-flight.{RESET}")
 
     # === THE PROBLEM ==========================================================
-    h("THE PROBLEM — a naive charge, retried after a crash")
-    with store._conn.cursor() as cur:
-        # The customer is charged. Then "the process crashed and a retry fired",
-        # so the same charge runs again — with no idempotency guard.
-        cur.execute("INSERT INTO naive_ledger (customer, amount) VALUES ('cust_1', 50)")
-        step("charge sent .................... $50")
-        cur.execute("INSERT INTO naive_ledger (customer, amount) VALUES ('cust_1', 50)")
-        step(f"{YELLOW}crash + blind retry fires the same charge again{RESET}")
-        cur.execute("SELECT coalesce(sum(amount),0) AS s FROM naive_ledger WHERE customer='cust_1'")
-        naive_total = cur.fetchone()["s"]
-    store._conn.commit()
+    # The control group gets the identical treatment the Hapax worker gets
+    # below: a real process, hard-killed at the same point. The only difference
+    # is that its "have I already charged this?" guard lives in process memory.
+    h("THE PROBLEM — a naive charge, crashed and retried")
+    r = _run_naive_worker(args.conninfo, "naive-1", crash_at="after_commit")
+    step(f"charge sent, then killed (kill -9, rc={r.returncode}) 💥")
+    step(f"charge landed .................. ledger=${_naive_total(store, 'naive-1')}, "
+         "but the in-memory guard died with the process")
+    _run_naive_worker(args.conninfo, "naive-1")  # the retry
+    step(f"{YELLOW}retry finds no record of the charge and sends it again{RESET}")
+    naive_total = _naive_total(store, "naive-1")
     bad(f"customer charged ${naive_total} — DOUBLE CHARGED")
 
     # === THE SOLUTION, CASE 1 =================================================
-    h("WITH hapax — CASE 1: crash BEFORE the charge commits")
+    h("WITH Hapax — CASE 1: crash BEFORE the charge commits")
     t1 = store.create_task({"op": "charge"}, idempotency_key="demo-1")
     step(f"task created .................... state={store.get_task(t1.id).state.value}")
     r = _run_worker(args.conninfo, t1.id, crash_at="before_commit")
@@ -123,7 +137,7 @@ def main() -> None:
     good(f"customer charged exactly once: ${_ledger_total(store, t1.id)}")
 
     # === THE SOLUTION, CASE 2 =================================================
-    h("WITH hapax — CASE 2: crash AFTER the charge commits")
+    h("WITH Hapax — CASE 2: crash AFTER the charge commits")
     t2 = store.create_task({"op": "charge"}, idempotency_key="demo-2")
     step(f"task created .................... state={store.get_task(t2.id).state.value}")
     r = _run_worker(args.conninfo, t2.id, crash_at="after_commit")
@@ -137,7 +151,7 @@ def main() -> None:
     # === SUMMARY ==============================================================
     h("RESULT")
     print(f"  naive approach:        {RED}${naive_total}  (double charged){RESET}")
-    print(f"  hapax:     {GREEN}$50   (exactly once, through two different crashes){RESET}")
+    print(f"  Hapax:                 {GREEN}$50   (exactly once, through two different crashes){RESET}")
     print(f"\n{DIM}Every kill above was a real SIGKILL; every dollar is a real row in Postgres.{RESET}\n")
     store.close()
 

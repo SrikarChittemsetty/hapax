@@ -32,26 +32,31 @@ That claim isn't asserted; it's **tested against a real Postgres with real `SIGK
 
 ## See it work
 
-A real, runnable demo — real worker processes, real `SIGKILL`s, real rows in Postgres. It shows a naive charge double-billing a customer after a crash, then this system staying exactly-once through two different crashes:
+Two ways, depending on how much of your time this deserves.
+
+**In your browser, in ten seconds:** [**srikarchittemsetty.github.io/hapax**](https://srikarchittemsetty.github.io/hapax/) steps through a recorded run — the naive worker double-charging on the left, Hapax charging once on the right, with the command line, exit status and SQL result behind every claim. It is a recording of a real run produced by [`scripts/record_trace.py`](scripts/record_trace.py), not an animation; the raw evidence ships as [`docs/trace.json`](docs/trace.json).
+
+**On your own machine, against your own Postgres:** `python scripts/demo.py` — real worker processes, real `SIGKILL`s, real rows in a database you can query afterwards.
 
 ![Crash-durability demo: a naive charge double-bills $100 after a crash, while this system charges exactly once ($50) through a crash before commit and a crash after commit.](demo.gif)
 
 ```
 $ python scripts/demo.py
 
-THE PROBLEM — a naive charge, retried after a crash
-  charge sent .................... $50
-  crash + blind retry fires the same charge again
+THE PROBLEM — a naive charge, crashed and retried
+  charge sent, then killed (kill -9, rc=-9) 💥
+  charge landed .................. ledger=$50, but the in-memory guard died with the process
+  retry finds no record of the charge and sends it again
   ✗ customer charged $100 — DOUBLE CHARGED
 
-WITH hapax — CASE 1: crash BEFORE the charge commits
+WITH Hapax — CASE 1: crash BEFORE the charge commits
   task created .................... state=working
   worker killed mid-transaction (kill -9, rc=-9) 💥
   charge rolled back ............. ledger=$0, state=working
   recovery re-runs the worker .... state=completed
   ✓ customer charged exactly once: $50
 
-WITH hapax — CASE 2: crash AFTER the charge commits
+WITH Hapax — CASE 2: crash AFTER the charge commits
   task created .................... state=working
   worker charged, then killed (kill -9, rc=-9) 💥
   charge already landed .......... ledger=$50, state=completed
@@ -60,7 +65,7 @@ WITH hapax — CASE 2: crash AFTER the charge commits
 
 RESULT
   naive approach:        $100  (double charged)
-  hapax:     $50   (exactly once, through two different crashes)
+  Hapax:                 $50   (exactly once, through two different crashes)
 ```
 
 Run it yourself: `python scripts/demo.py --conninfo "host=127.0.0.1 port=5432 user=postgres dbname=mdt"`. To render it as a GIF: `brew install vhs && vhs scripts/demo.tape`.
