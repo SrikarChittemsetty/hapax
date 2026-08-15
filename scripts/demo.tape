@@ -2,7 +2,7 @@
 #
 # Prereqs:
 #   brew install vhs
-#   a running Postgres, with MDT_DATABASE_URL set (or edit the command below)
+#   a running Postgres, with HAPAX_DATABASE_URL set (or edit the command below)
 #
 # Then:  vhs scripts/demo.tape   ->   produces demo.gif
 

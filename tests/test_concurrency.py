@@ -18,15 +18,15 @@ import time
 
 import pytest
 
-POSTGRES_URL = os.environ.get("MDT_TEST_DATABASE_URL")
+POSTGRES_URL = os.environ.get("HAPAX_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not POSTGRES_URL, reason="MDT_TEST_DATABASE_URL not set; needs Postgres"
+    not POSTGRES_URL, reason="HAPAX_TEST_DATABASE_URL not set; needs Postgres"
 )
 
 if POSTGRES_URL:
-    from mcp_durable_tasks.postgres import PostgresTaskStore
-    from mcp_durable_tasks.task import TaskState
-    from mcp_durable_tasks.worker import ensure_ledger
+    from hapax.postgres import PostgresTaskStore
+    from hapax.task import TaskState
+    from hapax.worker import ensure_ledger
 
 
 def _spawn_worker(task_id, *, work_seconds):
@@ -35,7 +35,7 @@ def _spawn_worker(task_id, *, work_seconds):
         [
             sys.executable,
             "-m",
-            "mcp_durable_tasks.worker",
+            "hapax.worker",
             "--conninfo",
             POSTGRES_URL,
             "--task-id",

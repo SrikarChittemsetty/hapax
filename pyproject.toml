@@ -1,5 +1,5 @@
 [project]
-name = "mcp-durable-tasks"
+name = "hapax"
 version = "0.1.0"
 description = "A crash-durable, spec-conformant task store for the MCP Tasks extension (SEP-2663) — the persistent store the reference SDKs leave to implementers."
 requires-python = ">=3.12"
@@ -15,7 +15,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_durable_tasks"]
+packages = ["src/hapax"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -23,6 +23,6 @@ asyncio_mode = "auto"
 
 [tool.mypy]
 python_version = "3.12"
-packages = ["mcp_durable_tasks"]
+packages = ["hapax"]
 warn_unused_ignores = true
 warn_redundant_casts = true

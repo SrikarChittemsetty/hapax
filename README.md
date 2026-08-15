@@ -1,10 +1,22 @@
-# mcp-durable-tasks
+# Hapax
 
-[![CI](https://github.com/SrikarChittemsetty/mcp-durable-tasks/actions/workflows/ci.yml/badge.svg)](https://github.com/SrikarChittemsetty/mcp-durable-tasks/actions/workflows/ci.yml)
+[![CI](https://github.com/SrikarChittemsetty/hapax/actions/workflows/ci.yml/badge.svg)](https://github.com/SrikarChittemsetty/hapax/actions/workflows/ci.yml)
 
-A crash-durable, spec-conformant task store for the [MCP Tasks extension](https://github.com/modelcontextprotocol/ext-tasks) (SEP-2663) — the persistent backend the reference SDKs leave to implementers.
+***hapax*** *(Greek, "once") — from* hapax legomenon*, a word that occurs exactly once.*
 
-When an AI agent starts a long-running tool call and the server handling it crashes mid-flight, that work is normally lost — or worse, silently re-run, double-charging a customer or sending an email twice. This project makes those tasks **survive crashes and take effect exactly once**.
+**Kill the server mid-payment and the customer still gets charged exactly once. Never zero times. Never twice.**
+
+When an AI agent kicks off a long-running job — charge this card, send this email, book this flight — and the machine running it dies halfway through, one of two bad things normally happens: the work is silently lost, or it is retried and *happens twice*. Hapax is the storage layer that makes neither possible.
+
+The guarantee is not asserted. It is tested against a real Postgres database with real `kill -9`s, and measured against the approach most people write first.
+
+|  | Hapax | The naive approach |
+|---|---|---|
+| 16 simultaneous retries of the same payment | **0 duplicate charges** | **14.99 duplicate charges** (avg/trial) |
+| Killed with `kill -9` before commit | **charged once** | lost or duplicated |
+| Killed with `kill -9` after commit | **charged once** | charged twice |
+
+**[▶ Watch it happen — no install required](https://srikarchittemsetty.github.io/hapax/)** — a step-by-step replay of a real recorded crash run.
 
 ---
 
@@ -32,14 +44,14 @@ THE PROBLEM — a naive charge, retried after a crash
   crash + blind retry fires the same charge again
   ✗ customer charged $100 — DOUBLE CHARGED
 
-WITH mcp-durable-tasks — CASE 1: crash BEFORE the charge commits
+WITH hapax — CASE 1: crash BEFORE the charge commits
   task created .................... state=working
   worker killed mid-transaction (kill -9, rc=-9) 💥
   charge rolled back ............. ledger=$0, state=working
   recovery re-runs the worker .... state=completed
   ✓ customer charged exactly once: $50
 
-WITH mcp-durable-tasks — CASE 2: crash AFTER the charge commits
+WITH hapax — CASE 2: crash AFTER the charge commits
   task created .................... state=working
   worker charged, then killed (kill -9, rc=-9) 💥
   charge already landed .......... ledger=$50, state=completed
@@ -48,7 +60,7 @@ WITH mcp-durable-tasks — CASE 2: crash AFTER the charge commits
 
 RESULT
   naive approach:        $100  (double charged)
-  mcp-durable-tasks:     $50   (exactly once, through two different crashes)
+  hapax:     $50   (exactly once, through two different crashes)
 ```
 
 Run it yourself: `python scripts/demo.py --conninfo "host=127.0.0.1 port=5432 user=postgres dbname=mdt"`. To render it as a GIF: `brew install vhs && vhs scripts/demo.tape`.
@@ -133,11 +145,11 @@ python3.12 -m venv .venv
 .venv/bin/pytest tests/test_state_machine.py tests/test_reaper.py
 
 # full suite incl. crash recovery needs Postgres:
-export MDT_TEST_DATABASE_URL="host=127.0.0.1 port=5432 user=postgres dbname=mdt"
+export HAPAX_TEST_DATABASE_URL="host=127.0.0.1 port=5432 user=postgres dbname=mdt"
 .venv/bin/pytest
 
 # benchmark:
-.venv/bin/python bench/benchmark.py --conninfo "$MDT_TEST_DATABASE_URL"
+.venv/bin/python bench/benchmark.py --conninfo "$HAPAX_TEST_DATABASE_URL"
 ```
 
 ## Speaking the protocol

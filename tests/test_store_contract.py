@@ -11,9 +11,9 @@ second task, on any backend.
 
 import pytest
 
-from mcp_durable_tasks.errors import InvalidTransition, TaskNotFound
-from mcp_durable_tasks.store import TaskStore
-from mcp_durable_tasks.task import TaskState
+from hapax.errors import InvalidTransition, TaskNotFound
+from hapax.store import TaskStore
+from hapax.task import TaskState
 
 
 def test_conforms_to_protocol(store):

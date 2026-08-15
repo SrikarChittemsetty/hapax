@@ -21,9 +21,9 @@ import sys
 
 import psycopg
 
-from mcp_durable_tasks.postgres import PostgresTaskStore
-from mcp_durable_tasks.task import TaskState
-from mcp_durable_tasks.worker import ensure_ledger
+from hapax.postgres import PostgresTaskStore
+from hapax.task import TaskState
+from hapax.worker import ensure_ledger
 
 # --- tiny ANSI helpers so the demo reads well in a terminal or a GIF ----------
 BOLD = "\033[1m"
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS naive_ledger (
 
 def _run_worker(conninfo, task_id, *, crash_at=None):
     cmd = [
-        sys.executable, "-m", "mcp_durable_tasks.worker",
+        sys.executable, "-m", "hapax.worker",
         "--conninfo", conninfo, "--task-id", task_id,
     ]
     if crash_at:
@@ -81,7 +81,7 @@ def main() -> None:
     ap.add_argument(
         "--conninfo",
         default=os.environ.get(
-            "MDT_DATABASE_URL", "host=127.0.0.1 port=55432 user=postgres dbname=mdt"
+            "HAPAX_DATABASE_URL", "host=127.0.0.1 port=55432 user=postgres dbname=mdt"
         ),
     )
     args = ap.parse_args()
@@ -93,7 +93,7 @@ def main() -> None:
         cur.execute("TRUNCATE tasks, ledger, naive_ledger")
     store._conn.commit()
 
-    print(f"{BOLD}mcp-durable-tasks — crash-durability demo{RESET}")
+    print(f"{BOLD}hapax — crash-durability demo{RESET}")
     print(f"{DIM}An agent charges a customer $50. The worker gets kill -9'd mid-flight.{RESET}")
 
     # === THE PROBLEM ==========================================================
@@ -111,7 +111,7 @@ def main() -> None:
     bad(f"customer charged ${naive_total} — DOUBLE CHARGED")
 
     # === THE SOLUTION, CASE 1 =================================================
-    h("WITH mcp-durable-tasks — CASE 1: crash BEFORE the charge commits")
+    h("WITH hapax — CASE 1: crash BEFORE the charge commits")
     t1 = store.create_task({"op": "charge"}, idempotency_key="demo-1")
     step(f"task created .................... state={store.get_task(t1.id).state.value}")
     r = _run_worker(args.conninfo, t1.id, crash_at="before_commit")
@@ -123,7 +123,7 @@ def main() -> None:
     good(f"customer charged exactly once: ${_ledger_total(store, t1.id)}")
 
     # === THE SOLUTION, CASE 2 =================================================
-    h("WITH mcp-durable-tasks — CASE 2: crash AFTER the charge commits")
+    h("WITH hapax — CASE 2: crash AFTER the charge commits")
     t2 = store.create_task({"op": "charge"}, idempotency_key="demo-2")
     step(f"task created .................... state={store.get_task(t2.id).state.value}")
     r = _run_worker(args.conninfo, t2.id, crash_at="after_commit")
@@ -137,7 +137,7 @@ def main() -> None:
     # === SUMMARY ==============================================================
     h("RESULT")
     print(f"  naive approach:        {RED}${naive_total}  (double charged){RESET}")
-    print(f"  mcp-durable-tasks:     {GREEN}$50   (exactly once, through two different crashes){RESET}")
+    print(f"  hapax:     {GREEN}$50   (exactly once, through two different crashes){RESET}")
     print(f"\n{DIM}Every kill above was a real SIGKILL; every dollar is a real row in Postgres.{RESET}\n")
     store.close()
 

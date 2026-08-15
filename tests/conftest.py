@@ -2,7 +2,7 @@
 
 The `store` fixture is parametrized over every backend, so the contract test
 suite runs unchanged against both the in-memory reference and Postgres. The
-Postgres runs are skipped unless MDT_TEST_DATABASE_URL points at a database —
+Postgres runs are skipped unless HAPAX_TEST_DATABASE_URL points at a database —
 that keeps `pytest` green on a machine with no database, while CI (and local
 dev with the throwaway Postgres) exercises the real thing.
 """
@@ -11,9 +11,9 @@ import os
 
 import pytest
 
-from mcp_durable_tasks.memory import InMemoryTaskStore
+from hapax.memory import InMemoryTaskStore
 
-POSTGRES_URL = os.environ.get("MDT_TEST_DATABASE_URL")
+POSTGRES_URL = os.environ.get("HAPAX_TEST_DATABASE_URL")
 
 
 @pytest.fixture(params=["memory", "postgres"])
@@ -23,9 +23,9 @@ def store(request):
         return
 
     if not POSTGRES_URL:
-        pytest.skip("MDT_TEST_DATABASE_URL not set; skipping Postgres backend")
+        pytest.skip("HAPAX_TEST_DATABASE_URL not set; skipping Postgres backend")
 
-    from mcp_durable_tasks.postgres import PostgresTaskStore
+    from hapax.postgres import PostgresTaskStore
 
     s = PostgresTaskStore(POSTGRES_URL)
     # Clean slate for each test so runs are independent.

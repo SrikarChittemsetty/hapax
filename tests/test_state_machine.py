@@ -7,8 +7,8 @@ importantly, any move *out of* a terminal state — is rejected.
 
 import pytest
 
-from mcp_durable_tasks.errors import InvalidTransition
-from mcp_durable_tasks.task import (
+from hapax.errors import InvalidTransition
+from hapax.task import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATES,
     Task,

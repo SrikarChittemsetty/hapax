@@ -11,12 +11,12 @@ import os
 
 import pytest
 
-from mcp_durable_tasks.errors import TaskNotFound
-from mcp_durable_tasks.memory import InMemoryTaskStore
-from mcp_durable_tasks.protocol import TasksProtocol
-from mcp_durable_tasks.task import TaskState
+from hapax.errors import TaskNotFound
+from hapax.memory import InMemoryTaskStore
+from hapax.protocol import TasksProtocol
+from hapax.task import TaskState
 
-POSTGRES_URL = os.environ.get("MDT_TEST_DATABASE_URL")
+POSTGRES_URL = os.environ.get("HAPAX_TEST_DATABASE_URL")
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ def test_same_key_returns_same_task_id(proto):
 
 @pytest.mark.skipif(not POSTGRES_URL, reason="needs Postgres")
 def test_task_survives_restart_through_protocol():
-    from mcp_durable_tasks.postgres import PostgresTaskStore
+    from hapax.postgres import PostgresTaskStore
 
     store1 = PostgresTaskStore(POSTGRES_URL)
     with store1._conn.cursor() as cur:

@@ -30,8 +30,8 @@ import argparse
 import time
 from dataclasses import dataclass
 
-from mcp_durable_tasks.memory import InMemoryTaskStore
-from mcp_durable_tasks.task import TaskState
+from hapax.memory import InMemoryTaskStore
+from hapax.task import TaskState
 
 
 @dataclass
@@ -80,7 +80,7 @@ def _summarize(op: str, backend: str, samples_s: list[float]) -> Stat:
 def _new_store(backend: str, conninfo: str | None):
     if backend == "memory":
         return InMemoryTaskStore()
-    from mcp_durable_tasks.postgres import PostgresTaskStore
+    from hapax.postgres import PostgresTaskStore
 
     s = PostgresTaskStore(conninfo)  # type: ignore[arg-type]
     with s._conn.cursor() as cur:

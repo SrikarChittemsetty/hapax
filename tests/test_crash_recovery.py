@@ -15,16 +15,16 @@ import sys
 
 import pytest
 
-POSTGRES_URL = os.environ.get("MDT_TEST_DATABASE_URL")
+POSTGRES_URL = os.environ.get("HAPAX_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not POSTGRES_URL, reason="MDT_TEST_DATABASE_URL not set; needs Postgres"
+    not POSTGRES_URL, reason="HAPAX_TEST_DATABASE_URL not set; needs Postgres"
 )
 
 # Imports guarded so collection doesn't fail without psycopg installed.
 if POSTGRES_URL:
-    from mcp_durable_tasks.postgres import PostgresTaskStore
-    from mcp_durable_tasks.task import TaskState
-    from mcp_durable_tasks.worker import ensure_ledger
+    from hapax.postgres import PostgresTaskStore
+    from hapax.task import TaskState
+    from hapax.worker import ensure_ledger
 
 
 def _run_worker(task_id, *, crash_at=None, amount=50, work_seconds=0.0):
@@ -32,7 +32,7 @@ def _run_worker(task_id, *, crash_at=None, amount=50, work_seconds=0.0):
     cmd = [
         sys.executable,
         "-m",
-        "mcp_durable_tasks.worker",
+        "hapax.worker",
         "--conninfo",
         POSTGRES_URL,
         "--task-id",

@@ -6,9 +6,9 @@ number of times, deterministically, without real waiting, and reports totals
 correctly. Uses the in-memory store so it needs no database.
 """
 
-from mcp_durable_tasks.memory import InMemoryTaskStore
-from mcp_durable_tasks.reaper import reap_once, run_reaper
-from mcp_durable_tasks.task import TaskState
+from hapax.memory import InMemoryTaskStore
+from hapax.reaper import reap_once, run_reaper
+from hapax.task import TaskState
 
 
 def _make_expired_terminal_task(store, key):
