@@ -46,8 +46,22 @@ CREATE INDEX IF NOT EXISTS idx_tasks_reap
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
 
--- Supports the claim query: "an unleased or lease-expired task still working".
--- Partial on state so the index only carries rows that could ever be claimed.
-CREATE INDEX IF NOT EXISTS idx_tasks_claimable
-    ON tasks (lease_expires_at)
+-- Supports the claim query: "the oldest claimable task".
+--
+-- The obvious index here is on lease_expires_at, and it is the wrong one. The
+-- claim orders by created_at, so an index on the lease column leaves Postgres
+-- sorting every claimable row on every single claim — a sequential scan plus a
+-- 10,000-row quicksort per claim, which the load benchmark caught as throughput
+-- falling from 1,700 to 560 tasks/s purely as a function of queue depth.
+--
+-- Indexing the sort key instead lets the claim walk rows in created_at order and
+-- stop at the first one it can take, so the cost no longer depends on how much
+-- work is waiting. The lease check rides along as a filter. That is the right
+-- trade while most queued tasks are unleased, which is the normal state; if
+-- nearly everything were leased at once the scan would walk further before
+-- finding a free row.
+CREATE INDEX IF NOT EXISTS idx_tasks_claim_order
+    ON tasks (created_at)
     WHERE state = 'working';
+
+DROP INDEX IF EXISTS idx_tasks_claimable;

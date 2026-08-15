@@ -184,6 +184,17 @@ Durability has a measurable cost, reported with percentiles (averages hide tail 
 
 The ~30–50× latency gap *is* the fsync-and-network tax for crash-survival — measured, not asserted.
 
+**Under concurrent load** — 20,000 tasks drained by N worker processes against one Postgres, median of 3 runs. Exactly-once is re-checked at every level:
+
+| workers | tasks/s | efficiency | claim p99 | commit p99 | exactly-once |
+|---|---|---|---|---|---|
+| 1 | 1,895 | 100% | 0.35 ms | 0.58 ms | ✓ |
+| **4** | **4,949** | 65% | 0.61 ms | 0.93 ms | ✓ |
+| 16 | 3,653 | 12% | 28.0 ms | 34.0 ms | ✓ |
+| 32 | 2,512 | 4% | 121 ms | 130 ms | ✓ |
+
+Peak is ~4,950 tasks/s at 4 workers; past that, throughput falls and the tail collapses. Writing this benchmark is what found the worst bug in the project — every claim was sequentially scanning and sorting the entire queue, because the index was on the filter column instead of the sort key. Fixing it took a claim from **1.808 ms to 0.113 ms** and peak throughput from 2,950 to 4,950 tasks/s. Full diagnosis, including what the ceiling turned out to be and the three candidates that were ruled out with evidence, is in [`bench/RESULTS.md`](bench/RESULTS.md).
+
 **Comparative correctness** — this system vs. the naive alternative (application-level check-then-insert) under a retry storm of N simultaneous same-key requests. Duplicate charges scale as ≈ N−1 for the naive approach; this system is exactly-once at every level:
 
 | concurrent requests | naive: avg duplicate charges/trial | ours |

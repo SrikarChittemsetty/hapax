@@ -128,7 +128,8 @@ class PostgresTaskStore:
                    AND EXISTS (
                        SELECT 1 FROM information_schema.columns
                         WHERE table_name = 'tasks' AND column_name = 'lease_expires_at'
-                   ) AS ready
+                   )
+                   AND to_regclass('idx_tasks_claim_order') IS NOT NULL AS ready
             """
         )
         row = cur.fetchone()
@@ -238,7 +239,10 @@ class PostgresTaskStore:
                      WHERE id = (
                            SELECT id FROM tasks
                             WHERE state = 'working'
-                              AND (lease_expires_at IS NULL OR lease_expires_at < %(now)s)
+                              -- coalesce, not "IS NULL OR ...", so this stays a
+                              -- plain filter the planner can apply while walking
+                              -- idx_tasks_claim_order in created_at order.
+                              AND coalesce(lease_expires_at, '-infinity'::timestamptz) < %(now)s
                             ORDER BY created_at
                               FOR UPDATE SKIP LOCKED
                             LIMIT 1
@@ -276,7 +280,7 @@ class PostgresTaskStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) AS n FROM tasks WHERE state = 'working'"
-                " AND (lease_expires_at IS NULL OR lease_expires_at < %s)",
+                " AND coalesce(lease_expires_at, '-infinity'::timestamptz) < %s",
                 [now],
             )
             row = cur.fetchone()
