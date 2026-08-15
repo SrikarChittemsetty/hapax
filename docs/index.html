@@ -294,12 +294,12 @@
 
     <div class="grid3">
       <div class="stat">
-        <div class="big good">0</div>
-        <div class="cap">Duplicate charges when 16 retries of the same payment land simultaneously.</div>
+        <div class="big good">0 / 500</div>
+        <div class="cap">Double charges across 500 crashes at randomly-timed <code>kill -9</code>s. The naive worker, same test: <b>121</b>.</div>
       </div>
       <div class="stat">
         <div class="big bad">14.99</div>
-        <div class="cap">Duplicate charges in that same test, average per trial, for the naive approach.</div>
+        <div class="cap">Duplicate charges the naive approach makes, per trial, when 16 retries of one payment arrive at once. Hapax: <b>0</b>.</div>
       </div>
       <div class="stat">
         <div class="big">68</div>
@@ -307,7 +307,23 @@
       </div>
     </div>
 
-    <h3 style="font-size:17px;margin:0 0 4px">Correctness under a retry storm</h3>
+    <h3 style="font-size:17px;margin:0 0 4px">500 crashes at random moments</h3>
+    <table>
+      <thead><tr><th>500 randomly-timed kills</th><th>Hapax</th><th>Naive</th></tr></thead>
+      <tbody>
+        <tr><td>Charged exactly once</td><td class="num good">500</td><td class="num">379</td></tr>
+        <tr><td>Charged twice</td><td class="num good">0</td><td class="num bad">121</td></tr>
+        <tr><td>Charge lost entirely</td><td class="num good">0</td><td class="num">0</td></tr>
+      </tbody>
+    </table>
+    <p class="caption">
+      The two crashes you watched above were chosen — the interesting boundaries. These 500 were
+      not: each kill lands at a uniformly random moment in the worker's measured lifetime, so they
+      fall wherever they fall, including inside the commit. About a quarter of them are enough to
+      make the naive worker bill someone twice.
+    </p>
+
+    <h3 style="font-size:17px;margin:28px 0 4px">Correctness under a retry storm</h3>
     <table>
       <thead><tr><th>Simultaneous retries</th><th>Naive: duplicate charges</th><th>Hapax</th></tr></thead>
       <tbody>

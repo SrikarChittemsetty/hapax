@@ -12,6 +12,7 @@ The guarantee is not asserted. It is tested against a real Postgres database wit
 
 |  | Hapax | The naive approach |
 |---|---|---|
+| 500 crashes at randomly-timed `kill -9`s | **0 double charges** | **121 double charges** |
 | 16 simultaneous retries of the same payment | **0 duplicate charges** | **14.99 duplicate charges** (avg/trial) |
 | Killed with `kill -9` before commit | **charged once** | lost or duplicated |
 | Killed with `kill -9` after commit | **charged once** | charged twice |
@@ -115,6 +116,7 @@ Five states, with an explicit per-state allow-list of legal transitions. The thr
 
 - **`tests/test_crash_recovery.py`** — spawns the worker as a real OS process, kills it with an actual `SIGKILL` at each commit boundary (`before_commit`, `after_commit`), and asserts the ledger holds exactly one row across the crash + recovery. Also covers a crash-loop (repeated recovery stays exactly-once).
 - **`tests/test_concurrency.py`** — launches two workers on the same task at the same instant; the row lock serializes them and the charge still happens exactly once.
+- **`bench/chaos.py`** — because those three crash points were *chosen*, this kills the worker at a uniformly random moment across its measured lifetime instead. 500 randomized kills: **0 double charges, 0 lost charges**. The identical harness pointed at the naive control group (`--strategy naive`) produces **121 double charges out of 500**.
 - **`tests/test_store_contract.py`** — the behavioral spec, run against both backends.
 - **`tests/test_state_machine.py`** — every legal transition, and every illegal move out of a terminal state.
 

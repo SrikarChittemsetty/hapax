@@ -87,6 +87,44 @@ and at-least-once queues deliver duplicates in tight bursts. The point is that t
 naive approach has no safe floor under contention, while the DB-level approach has
 no failures at all.)
 
+## Randomized crash testing (chaos)
+
+The crash-recovery tests kill the worker at three *chosen* points — before the
+effect, before the commit, after the commit. That is the right place to start and
+the wrong place to stop: hand-picked crash points only prove the guarantee holds
+where the author thought to look. `bench/chaos.py` removes the choosing.
+
+**Method.** Each trial spawns a real worker, waits a uniformly random interval,
+and hard-kills it with `SIGKILL` from the parent. The interval is drawn from
+`[0, 1.15 × L)` where `L` is the worker's *measured* median lifetime — calibrated
+per run, because spreading kills over the job duration alone would land every one
+of them in Python interpreter startup and prove nothing. Recovery then runs, and
+the database is checked for the invariant: exactly one charge, totalling $50.
+The same harness runs the naive control group (`--strategy naive`) against the
+identical distribution of kill times.
+
+```bash
+python bench/chaos.py --conninfo "…" --trials 500              # Hapax
+python bench/chaos.py --conninfo "…" --trials 500 --strategy naive
+```
+
+**Result** (500 trials each, seed 1234, worker lifetime ≈ 200 ms):
+
+| | Hapax | Naive (in-memory dedup) |
+|---|---|---|
+| charged exactly once | **500 / 500** | 379 / 500 |
+| double charges | **0** | **121 (24.2%)** |
+| lost charges | 0 | 0 |
+
+Where the kills actually landed, Hapax run: 302 before the charge committed, 29
+after it committed, 169 after the worker had already exited. The naive run drew
+from the same distribution (380 / 32 / 88).
+
+**Reading it:** roughly a quarter of randomly-timed crashes are enough to make the
+naive worker bill a customer twice, and none of them are enough to make Hapax do
+it. The failures are not exotic — they are the ordinary case of a process dying
+after its side effect committed but before anything durable recorded that fact.
+
 ## Roadmap
 
 The intended next comparison is a **Temporal-wrapped baseline** running the same
