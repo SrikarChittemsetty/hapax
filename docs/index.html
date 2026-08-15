@@ -302,8 +302,23 @@
         <div class="cap">Duplicate charges the naive approach makes, per trial, when 16 retries of one payment arrive at once. Hapax: <b>0</b>.</div>
       </div>
       <div class="stat">
-        <div class="big">68</div>
+        <div class="big good">20 ms</div>
+        <div class="cap">Median time to notice a worker died and recover its job — with nothing retrying it.</div>
+      </div>
+    </div>
+
+    <div class="grid3">
+      <div class="stat">
+        <div class="big">87</div>
         <div class="cap">Automated tests, including real <code>SIGKILL</code>s against a real Postgres, green in CI.</div>
+      </div>
+      <div class="stat">
+        <div class="big good">500 / 500</div>
+        <div class="cap">Crashes recovered automatically, charged exactly once, with no external retry involved.</div>
+      </div>
+      <div class="stat">
+        <div class="big">0.122 ms</div>
+        <div class="cap">Median durable write. Surviving a crash costs about 30–50× an in-memory one.</div>
       </div>
     </div>
 
@@ -374,6 +389,16 @@
           Checking “does this already exist?” in application code has a gap between the check and
           the insert that two simultaneous requests can both slip through. A database constraint
           has no such gap.
+        </p>
+      </div>
+      <div class="card">
+        <h4>A dead worker announces itself by going quiet</h4>
+        <p>
+          A worker takes a job by writing a deadline onto it. Finish, and the job is closed
+          for good. Die, and nothing renews that deadline — it simply passes, and the job
+          goes back in the queue for someone else. Nothing has to detect the crash or report
+          it, because the silence <em>is</em> the report. Recovering takes 20 ms, and needs
+          no human and no retry.
         </p>
       </div>
       <div class="card">
