@@ -17,6 +17,10 @@ The guarantee is not asserted. It is tested against a real Postgres database wit
 | Killed with `kill -9` before commit | **charged once** | lost or duplicated |
 | Killed with `kill -9` after commit | **charged once** | charged twice |
 
+And nothing has to notice the crash for that to hold: a dead worker's lease
+lapses and its job is picked up automatically, median **20 ms** later, with no
+retry from outside the system.
+
 **[▶ Watch it happen — no install required](https://srikarchittemsetty.github.io/hapax/)** — a step-by-step replay of a real recorded crash run.
 
 ---
