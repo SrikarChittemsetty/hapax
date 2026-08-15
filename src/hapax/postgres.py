@@ -34,6 +34,11 @@ from .store import new_task_id
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
 
+# An arbitrary but fixed key for the advisory lock that serializes schema
+# migration. Advisory locks are just int64s Postgres tracks for you; the value
+# means nothing beyond "everyone migrating this schema agrees to use this one".
+_SCHEMA_LOCK_KEY = 0x48415041  # "HAPA"
+
 # The terminal states, as bare strings, for use in SQL IN-clauses.
 _TERMINAL_VALUES = tuple(s.value for s in TERMINAL_STATES)
 
@@ -41,6 +46,10 @@ _COLUMNS = (
     "id, state, input, idempotency_key, result, error, "
     "progress, progress_message, created_at, updated_at, expires_at"
 )
+# Reads also pull the lease bookkeeping. Writes don't: create_task never sets a
+# lease (a new task is unclaimed by definition) and the lease columns have
+# defaults, so keeping the insert list narrow avoids restating them everywhere.
+_READ_COLUMNS = _COLUMNS + ", attempts, lease_expires_at"
 
 
 def _row_to_task(row: dict[str, Any]) -> Task:
@@ -58,6 +67,10 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         expires_at=row["expires_at"],
+        # .get(): rows coming back from the INSERT ... RETURNING in create_task
+        # use the narrow column list and carry no lease fields yet.
+        attempts=row.get("attempts", 0) or 0,
+        lease_expires_at=row.get("lease_expires_at"),
     )
 
 
@@ -78,9 +91,48 @@ class PostgresTaskStore:
         self.apply_schema()
 
     def apply_schema(self) -> None:
+        """Bring the database up to the current schema, safely under concurrency.
+
+        Every store applies the schema on connect, which means N workers starting
+        at once all try to run the same DDL. That is fine for `CREATE ... IF NOT
+        EXISTS`, which does nothing when the object is there, but *not* for
+        `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`: it takes an AccessExclusiveLock
+        on the table before it can decide there is nothing to do. Two workers
+        doing that simultaneously deadlock each other — which is exactly how this
+        was found, by the two-workers-racing test starting to fail.
+
+        So: check first, and only reach for DDL if the schema is actually behind.
+        The common path — an already-migrated database — takes no locks at all.
+        """
         with self._conn.cursor() as cur:
-            cur.execute(_SCHEMA_SQL)
+            if self._schema_is_current(cur):
+                self._conn.commit()
+                return
+
+            # Serialize the processes that *do* need to migrate, so they queue
+            # for the DDL rather than deadlocking over it. The lock is held for
+            # the transaction and released by the commit below.
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", [_SCHEMA_LOCK_KEY])
+            # Re-check: while waiting for the lock, another process may have
+            # done the work already.
+            if not self._schema_is_current(cur):
+                cur.execute(_SCHEMA_SQL)
         self._conn.commit()
+
+    @staticmethod
+    def _schema_is_current(cur: psycopg.Cursor[dict[str, Any]]) -> bool:
+        """Is the tasks table present and carrying the newest columns?"""
+        cur.execute(
+            """
+            SELECT to_regclass('tasks') IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'tasks' AND column_name = 'lease_expires_at'
+                   ) AS ready
+            """
+        )
+        row = cur.fetchone()
+        return bool(row["ready"]) if row else False
 
     def close(self) -> None:
         self._conn.close()
@@ -145,7 +197,7 @@ class PostgresTaskStore:
 
                 # Conflict: a task with this key already exists. Return it.
                 cur.execute(
-                    f"SELECT {_COLUMNS} FROM tasks WHERE idempotency_key = %s",
+                    f"SELECT {_READ_COLUMNS} FROM tasks WHERE idempotency_key = %s",
                     [idempotency_key],
                 )
                 existing = cur.fetchone()
@@ -153,12 +205,90 @@ class PostgresTaskStore:
                 assert existing is not None
                 return _row_to_task(existing)
 
+    # --- leases: claiming work, and noticing when a claimant dies -------------
+
+    def claim_task(self, *, lease_seconds: float = 30) -> Task | None:
+        """Take exclusive ownership of one claimable task, or return None.
+
+        A task is claimable if it is still `working` and nobody holds a live
+        lease on it — either it has never been claimed, or the worker that
+        claimed it stopped renewing (which, for a process that took a SIGKILL,
+        means it stopped existing).
+
+        The whole thing is one statement on purpose. A SELECT to find a
+        candidate followed by an UPDATE to claim it is the same check-then-act
+        race that `create_task` avoids at the other end of the lifecycle: two
+        dispatchers would both see the same expired task and both claim it.
+        Here the subquery takes a row lock and the UPDATE writes the lease
+        inside the same statement, so exactly one claimant can win.
+
+        `SKIP LOCKED` is what makes this usable with more than one dispatcher:
+        a claimant that finds a row already locked steps over it and takes the
+        next one, instead of blocking until the other transaction commits.
+        """
+        now = _now()
+        deadline = now + timedelta(seconds=lease_seconds)
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE tasks
+                       SET lease_expires_at = %(deadline)s,
+                           attempts = attempts + 1
+                     WHERE id = (
+                           SELECT id FROM tasks
+                            WHERE state = 'working'
+                              AND (lease_expires_at IS NULL OR lease_expires_at < %(now)s)
+                            ORDER BY created_at
+                              FOR UPDATE SKIP LOCKED
+                            LIMIT 1
+                           )
+                    RETURNING {_READ_COLUMNS}
+                    """,
+                    {"deadline": deadline, "now": now},
+                )
+                row = cur.fetchone()
+        return _row_to_task(row) if row is not None else None
+
+    def heartbeat(self, task_id: str, *, lease_seconds: float = 30) -> bool:
+        """Push a held lease further out. Returns False if the task is gone or
+        already terminal — a worker whose task went terminal underneath it
+        (cancelled, say) learns that here rather than by finishing work nobody
+        wants any more."""
+        deadline = _now() + timedelta(seconds=lease_seconds)
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET lease_expires_at = %s"
+                    " WHERE id = %s AND state = 'working' RETURNING id",
+                    [deadline, task_id],
+                )
+                return cur.fetchone() is not None
+
+    def count_claimable(self) -> int:
+        """How many tasks are sitting there waiting for someone to pick up.
+
+        Useful as a health metric: a number that climbs means work is arriving
+        faster than dispatchers can take it, or that something is repeatedly
+        claiming and dying.
+        """
+        now = _now()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM tasks WHERE state = 'working'"
+                " AND (lease_expires_at IS NULL OR lease_expires_at < %s)",
+                [now],
+            )
+            row = cur.fetchone()
+        self._conn.commit()
+        return int(row["n"]) if row else 0
+
     # --- read -----------------------------------------------------------------
 
     def get_task(self, task_id: str) -> Task:
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT {_COLUMNS} FROM tasks WHERE id = %s", [task_id]
+                f"SELECT {_READ_COLUMNS} FROM tasks WHERE id = %s", [task_id]
             )
             row = cur.fetchone()
         self._conn.commit()
@@ -183,7 +313,7 @@ class PostgresTaskStore:
                 # Lock the row for the read-modify-write. Any concurrent updater
                 # blocks here until we commit.
                 cur.execute(
-                    f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE",
+                    f"SELECT {_READ_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE",
                     [task_id],
                 )
                 row = cur.fetchone()
@@ -256,7 +386,7 @@ class PostgresTaskStore:
         with self._conn.transaction():
             with self._conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT {_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE",
+                    f"SELECT {_READ_COLUMNS} FROM tasks WHERE id = %s FOR UPDATE",
                     [task_id],
                 )
                 row = cur.fetchone()

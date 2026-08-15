@@ -57,6 +57,7 @@ def process_charge(
     *,
     crash_at: str | None = None,
     work_seconds: float = 0.0,
+    lease_seconds: float = 30,
 ) -> str:
     """Process a charge task exactly once. Returns an outcome string.
 
@@ -69,6 +70,13 @@ def process_charge(
     if task.is_terminal:
         # Recovery path: the work already finished in a previous (crashed) run.
         return "noop-terminal"
+
+    # Announce that this task now has someone working on it. While the lease is
+    # live no dispatcher will hand the task to a second worker; if this process
+    # dies, nothing renews it and the task returns to the claimable pool on its
+    # own. A longer job would renew this periodically — the charge here is short
+    # enough that one lease covers it.
+    store.heartbeat(task_id, lease_seconds=lease_seconds)
 
     if crash_at == "before_effect":
         _hard_crash()
@@ -105,6 +113,8 @@ def main() -> None:
     ap.add_argument("--amount", type=int, default=50)
     ap.add_argument("--crash-at", choices=CRASH_POINTS, default=None)
     ap.add_argument("--work-seconds", type=float, default=0.0)
+    ap.add_argument("--lease-seconds", type=float, default=30,
+                    help="how long to claim the task for before it looks abandoned")
     args = ap.parse_args()
 
     outcome = process_charge(
@@ -113,6 +123,7 @@ def main() -> None:
         args.amount,
         crash_at=args.crash_at,
         work_seconds=args.work_seconds,
+        lease_seconds=args.lease_seconds,
     )
     print(outcome)
 

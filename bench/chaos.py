@@ -38,8 +38,9 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from hapax.dispatcher import Dispatcher
 from hapax.postgres import PostgresTaskStore
-from hapax.worker import ensure_ledger
+from hapax.worker import ensure_ledger, process_charge
 
 AMOUNT = 50
 
@@ -48,9 +49,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 NAIVE_WORKER = REPO_ROOT / "scripts" / "naive_worker.py"
 
 
-def _spawn(conninfo: str, task_id: str, work_seconds: float, strategy: str = "hapax") -> subprocess.Popen:
+def _spawn(conninfo: str, task_id: str, work_seconds: float, strategy: str = "hapax",
+           lease_seconds: float | None = None) -> subprocess.Popen:
     if strategy == "hapax":
         cmd = [sys.executable, "-m", "hapax.worker"]
+        if lease_seconds is not None:
+            cmd += ["--lease-seconds", str(lease_seconds)]
     else:
         cmd = [sys.executable, str(NAIVE_WORKER)]
     return subprocess.Popen(
@@ -107,6 +111,8 @@ def run_trial(
     work_seconds: float,
     window: float,
     strategy: str = "hapax",
+    recovery: str = "manual",
+    lease_seconds: float = 0.25,
 ) -> dict:
     if strategy == "hapax":
         task_id = store.create_task({"op": "charge"}, idempotency_key=f"chaos-{i}").id
@@ -118,7 +124,8 @@ def run_trial(
     # to survive.
     kill_at = rng.uniform(0.0, window)
 
-    proc = _spawn(conninfo, task_id, work_seconds, strategy)
+    proc = _spawn(conninfo, task_id, work_seconds, strategy,
+                  lease_seconds=lease_seconds if recovery == "dispatcher" else None)
     time.sleep(kill_at)
     killed = proc.poll() is None
     if killed:
@@ -129,15 +136,36 @@ def run_trial(
     rows_after_crash, _ = _ledger_rows(conn, task_id, strategy)
     state_after_crash = store.get_task(task_id).state.value if strategy == "hapax" else "n/a"
 
-    # Recovery: the same thing a queue or supervisor would do.
-    rec_cmd = (
-        [sys.executable, "-m", "hapax.worker"] if strategy == "hapax"
-        else [sys.executable, str(NAIVE_WORKER)]
-    )
-    rec = subprocess.run(
-        rec_cmd + ["--conninfo", conninfo, "--task-id", task_id],
-        capture_output=True, text=True, timeout=60,
-    )
+    recovered_in_ms = None
+    if recovery == "dispatcher":
+        # Nobody retries anything. Wait for the dead worker's lease to lapse and
+        # let a dispatcher sweep find the task, timing how long that takes from
+        # the moment of death.
+        t0 = time.perf_counter()
+        dispatcher = Dispatcher(
+            store=store,
+            handler=lambda t: process_charge(conninfo, t.id, lease_seconds=lease_seconds),
+            lease_seconds=30,
+        )
+        deadline = t0 + 30
+        while time.perf_counter() < deadline:
+            if dispatcher.sweep(limit=1) > 0:
+                break
+            if store.get_task(task_id).is_terminal:
+                break
+            time.sleep(0.01)
+        recovered_in_ms = round((time.perf_counter() - t0) * 1000, 1)
+        rec = subprocess.CompletedProcess(args=[], returncode=0, stdout="dispatcher", stderr="")
+    else:
+        # Recovery: the same thing a queue or supervisor would do.
+        rec_cmd = (
+            [sys.executable, "-m", "hapax.worker"] if strategy == "hapax"
+            else [sys.executable, str(NAIVE_WORKER)]
+        )
+        rec = subprocess.run(
+            rec_cmd + ["--conninfo", conninfo, "--task-id", task_id],
+            capture_output=True, text=True, timeout=60,
+        )
 
     rows, total = _ledger_rows(conn, task_id, strategy)
     state = store.get_task(task_id).state.value if strategy == "hapax" else "n/a"
@@ -154,6 +182,7 @@ def run_trial(
         "total": total,
         "state": state,
         "recovery_said": rec.stdout.strip(),
+        "recovered_in_ms": recovered_in_ms,
     }
 
 
@@ -166,6 +195,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1234, help="fixed so runs are reproducible")
     ap.add_argument("--strategy", choices=["hapax", "naive"], default="hapax",
                     help="'naive' runs the identical experiment against the control group")
+    ap.add_argument("--recovery", choices=["manual", "dispatcher"], default="manual",
+                    help="'dispatcher' lets a lapsed lease trigger recovery instead of "
+                         "re-running the worker by hand")
+    ap.add_argument("--lease-seconds", type=float, default=0.25,
+                    help="lease the worker takes, in dispatcher mode")
     args = ap.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -190,12 +224,14 @@ def main() -> None:
     conn.commit()
 
     started = time.perf_counter()
-    print(f"chaos [{args.strategy}]: {args.trials} trials, seed={args.seed}")
+    print(f"chaos [{args.strategy}, recovery={args.recovery}]: "
+          f"{args.trials} trials, seed={args.seed}")
     print(f"worker lifetime measured at {lifetime * 1000:.0f} ms; "
           f"SIGKILL at a uniformly random point in [0, {window * 1000:.0f} ms)\n")
 
     for i in range(args.trials):
-        r = run_trial(store, conn, args.conninfo, i, rng, args.work_seconds, window, args.strategy)
+        r = run_trial(store, conn, args.conninfo, i, rng, args.work_seconds, window,
+                      args.strategy, args.recovery, args.lease_seconds)
         results.append(r)
 
         # Where did the kill actually land? Read it off the state it left behind.
@@ -226,6 +262,13 @@ def main() -> None:
     print(f"lost charges               {sum(1 for r in results if r['rows'] == 0)}")
     print(f"violations                 {len(violations)}")
     print(f"wall clock                 {elapsed:.1f}s")
+    times = sorted(r["recovered_in_ms"] for r in results if r["recovered_in_ms"] is not None)
+    if times:
+        print(f"\ntime from crash to automatic recovery (lease {args.lease_seconds}s):")
+        print(f"  p50  {times[len(times) // 2]:.0f} ms")
+        print(f"  p95  {times[int(len(times) * 0.95)]:.0f} ms")
+        print(f"  max  {times[-1]:.0f} ms")
+
     print("\nwhere the kills landed:")
     for label, n in buckets.most_common():
         print(f"  {n:>4}  {label}")

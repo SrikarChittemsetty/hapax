@@ -115,6 +115,14 @@ class Task:
     updated_at: datetime = field(default_factory=_now)
     # When this task becomes eligible for TTL reaping. None = never expires.
     expires_at: datetime | None = None
+    # Lease bookkeeping. These describe the *worker currently holding the task*,
+    # not the task's own state, which is why nothing in the state machine reads
+    # them. A dispatcher needs `attempts` to recognise a task that keeps killing
+    # whatever picks it up, and `lease_expires_at` to answer "is anyone actually
+    # working on this?" — a question the state alone cannot answer, because a
+    # task whose worker died looks exactly like one being worked on right now.
+    attempts: int = 0
+    lease_expires_at: datetime | None = None
 
     @property
     def is_terminal(self) -> bool:

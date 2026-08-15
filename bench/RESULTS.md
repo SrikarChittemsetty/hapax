@@ -125,6 +125,40 @@ naive worker bill a customer twice, and none of them are enough to make Hapax do
 it. The failures are not exotic — they are the ordinary case of a process dying
 after its side effect committed but before anything durable recorded that fact.
 
+## Automatic recovery (no retry from outside)
+
+The chaos numbers above still had a retry doing the recovering. This run removes
+it: the worker takes a lease, gets killed, and **nothing retries anything**. The
+task comes back only because the lease lapsed and a dispatcher swept it up.
+
+```bash
+python bench/chaos.py --conninfo "…" --trials 500 --recovery dispatcher
+```
+
+**Result** (500 trials, seed 1234, 250 ms lease):
+
+| | |
+|---|---|
+| charged exactly once | **500 / 500** |
+| double charges | **0** |
+| lost charges | **0** |
+| crash → recovery, p50 | **20 ms** |
+| p95 | 279 ms |
+| max | 302 ms |
+
+**Reading it:** the distribution is bimodal by construction. A kill that lands
+before the worker has taken its lease leaves the task immediately claimable, so
+recovery is a single sweep away (~20 ms). A kill that lands after it has to wait
+out the remainder of the lease, which puts the tail just above the 250 ms lease
+length. Recovery latency is therefore bounded by the lease, not by anything in
+the store — the tuning question is how long a genuinely slow worker deserves
+before it is presumed dead, and the answer is a deployment decision rather than
+a property of this code.
+
+Note also what the kill distribution says: 32 of the 500 kills landed *after* the
+charge committed. Every one of those was re-dispatched, and every one of those
+re-dispatched workers declined to charge again.
+
 ## Roadmap
 
 The intended next comparison is a **Temporal-wrapped baseline** running the same

@@ -104,6 +104,54 @@ Five states, with an explicit per-state allow-list of legal transitions. The thr
 | `input_required` | `working` (resumes after getting input), `failed`, `cancelled` |
 | `completed` / `failed` / `cancelled` | — (terminal, permanent) |
 
+## How a dead worker gets noticed
+
+Everything above assumes *something* eventually retries the task. That assumption
+was doing real work, and it was unearned: a task whose worker died stayed
+`working` for ever unless a queue redelivered it or a human noticed.
+
+Leases remove the assumption. A worker claims a task by writing a deadline into
+it; while that deadline is in the future, no dispatcher will hand the task to
+anyone else. If the worker finishes, the task goes terminal and stops being
+claimable at all. If the worker dies, nothing renews the deadline, it passes, and
+the task returns to the claimable pool on its own. **The absence of a heartbeat
+is the detection** — there is no liveness table to keep in sync with reality, and
+nothing to notify.
+
+Two details are load-bearing:
+
+- **Claiming is a single statement.** `UPDATE … WHERE id = (SELECT … FOR UPDATE
+  SKIP LOCKED LIMIT 1)`. A SELECT to find an expired task followed by an UPDATE to
+  claim it is the same check-then-act race that `create_task` avoids at the other
+  end of the lifecycle — two dispatchers would both see the same lapsed task and
+  both take it. `SKIP LOCKED` is what lets several dispatchers work the same
+  table without queueing behind each other.
+- **The dispatcher is allowed to be wrong.** It only decides *who runs a task*; it
+  never performs the side effect. Since terminal tasks are never claimable and the
+  effect commits with the state change, re-dispatching a task whose effect already
+  landed is harmless — the handler reads the terminal state and declines. Claiming
+  twice is possible; charging twice is not.
+
+Measured with the same chaos harness, but with **nothing retrying anything** —
+recovery happens only because a lease lapsed:
+
+| 500 randomly-timed kills, recovered automatically | |
+|---|---|
+| charged exactly once | **500 / 500** |
+| double charges | **0** |
+| time from crash to recovery, p50 | **20 ms** |
+| p95 / max | 279 ms / 302 ms |
+
+The distribution is bimodal on purpose: a kill that lands before the worker takes
+its lease leaves the task instantly claimable, and one that lands after it waits
+out the remaining lease. So recovery latency is bounded by the lease length,
+which is the knob — 250 ms here, and a real deployment would trade it against how
+long a legitimately slow worker should be left alone.
+
+```bash
+python bench/chaos.py --conninfo "…" --trials 500 --recovery dispatcher
+```
+
 ## Design decisions (the interview talking points)
 
 - **Idempotency is enforced by the database, not application code.** A `UNIQUE` index on `idempotency_key` plus `INSERT … ON CONFLICT DO NOTHING` means even two simultaneous requests with the same key produce exactly one task. A check-then-insert in Python would race; the DB constraint can't.
@@ -188,12 +236,12 @@ That's the document to read alongside the source (and the one to have in mind fo
 
 - Single-node Postgres; no leader election or multi-region. The durability story is "survive process crash," not "survive datacenter loss."
 - The benchmark is single-process, single-connection — it measures the store's own overhead, not a production deployment under concurrent load.
-- Recovery here is *pull-based* (a worker re-runs and observes terminal state). A push-based scheduler that automatically re-dispatches orphaned `working` tasks is on the roadmap.
+- Leases are wall-clock based. A worker that is merely paused — a long GC, a stopped container, a clock jump — can have its lease lapse while it is still alive, and the task gets handed to someone else. That is survivable here *because* the effect is exactly-once regardless of how many workers run it, which is rather the point; but it does mean the lease length is a real tuning decision, not a formality.
 
 ## Roadmap
 
 - Temporal-wrapped baseline benchmark (answer "doesn't Temporal already do this?" with numbers).
-- Orphan detection: auto-requeue tasks stuck in `working` after a worker dies.
+- Multiple dispatcher processes sharing a fleet, with the lease length tuned per workload rather than fixed.
 - A thin MCP server binding so it drops into a real agent runtime.
 
 ## Why it exists

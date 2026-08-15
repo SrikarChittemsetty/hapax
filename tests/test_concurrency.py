@@ -88,3 +88,44 @@ def test_two_workers_race_same_task_charge_once(store):
     # ...but the charge happened exactly once, and the task is completed.
     assert store.get_task(task.id).state == TaskState.COMPLETED
     assert _ledger_count(store, task.id) == 1
+
+
+def test_many_stores_can_apply_the_schema_at_once(store):
+    """Every store applies the schema on connect, so startup is itself a race.
+
+    This is a regression test for a real deadlock: adding a column to the schema
+    made `apply_schema` take an AccessExclusiveLock on `tasks` even when there
+    was nothing to add, and two workers starting together deadlocked on it. The
+    column is dropped here to force the migration path, which is the only path
+    that can deadlock.
+    """
+    import threading
+
+    with store._conn.cursor() as cur:
+        cur.execute("ALTER TABLE tasks DROP COLUMN IF EXISTS lease_expires_at")
+    store._conn.commit()
+
+    errors: list[Exception] = []
+
+    def connect_and_migrate():
+        try:
+            PostgresTaskStore(POSTGRES_URL).close()
+        except Exception as e:  # noqa: BLE001 — the failure is the whole point
+            errors.append(e)
+
+    threads = [threading.Thread(target=connect_and_migrate) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"concurrent schema application failed: {errors[:2]}"
+
+    # And the migration actually happened, rather than everyone quietly skipping it.
+    with store._conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns"
+            " WHERE table_name = 'tasks' AND column_name = 'lease_expires_at'"
+        )
+        assert cur.fetchone() is not None
+    store._conn.commit()

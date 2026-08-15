@@ -8,6 +8,7 @@ whole point of the Postgres backend that comes next.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -28,6 +29,11 @@ class InMemoryTaskStore:
         # idempotency_key -> task_id. This secondary index is what makes dedup
         # an O(1) lookup instead of a scan.
         self._by_key: dict[str, str] = {}
+        # task_id -> lease deadline, and task_id -> times claimed. Separate from
+        # Task itself because a lease says something about the *worker* holding
+        # the task, not about the task.
+        self._leases: dict[str, datetime] = {}
+        self._attempts: dict[str, int] = {}
 
     def create_task(
         self,
@@ -88,6 +94,50 @@ class InMemoryTaskStore:
         )
         self._tasks[task_id] = moved
         return moved
+
+    # --- leases ---------------------------------------------------------------
+    #
+    # Same semantics as the Postgres backend so the contract suite can hold both
+    # to one standard. There is no crash story here — a process dying takes this
+    # whole store with it — but the *rules* about what is claimable have to match,
+    # or the contract tests would be testing two different things.
+
+    def claim_task(self, *, lease_seconds: float = 30) -> Task | None:
+        now = _now()
+        claimable = [
+            t
+            for t in self._tasks.values()
+            if t.state is TaskState.WORKING
+            and (self._leases.get(t.id) is None or self._leases[t.id] < now)
+        ]
+        if not claimable:
+            return None
+        # Oldest first, matching the Postgres ORDER BY created_at.
+        task = min(claimable, key=lambda t: (t.created_at, t.id))
+        deadline = now + timedelta(seconds=lease_seconds)
+        self._leases[task.id] = deadline
+        self._attempts[task.id] = self._attempts.get(task.id, 0) + 1
+        claimed = replace(
+            task, attempts=self._attempts[task.id], lease_expires_at=deadline
+        )
+        self._tasks[task.id] = claimed
+        return claimed
+
+    def heartbeat(self, task_id: str, *, lease_seconds: float = 30) -> bool:
+        task = self._tasks.get(task_id)
+        if task is None or task.state is not TaskState.WORKING:
+            return False
+        self._leases[task_id] = _now() + timedelta(seconds=lease_seconds)
+        return True
+
+    def count_claimable(self) -> int:
+        now = _now()
+        return sum(
+            1
+            for t in self._tasks.values()
+            if t.state is TaskState.WORKING
+            and (self._leases.get(t.id) is None or self._leases[t.id] < now)
+        )
 
     def cancel_task(self, task_id: str) -> Task:
         return self.update_task(task_id, TaskState.CANCELLED)

@@ -66,6 +66,24 @@ class TaskStore(Protocol):
         for unknown ids and InvalidTransition for illegal moves."""
         ...
 
+    def claim_task(self, *, lease_seconds: float = 30) -> Task | None:
+        """Take exclusive ownership of one claimable task, or return None.
+
+        Claimable means: still `working`, and no live lease held on it. A worker
+        that dies stops renewing its lease, so its task becomes claimable again
+        without anyone having to notice or report the death. Claiming must be
+        atomic — two callers racing must not both receive the same task."""
+        ...
+
+    def heartbeat(self, task_id: str, *, lease_seconds: float = 30) -> bool:
+        """Extend a held lease. False if the task is unknown or no longer
+        `working`, which is how a worker learns its task was cancelled."""
+        ...
+
+    def count_claimable(self) -> int:
+        """How many tasks are waiting to be picked up right now."""
+        ...
+
     def cancel_task(self, task_id: str) -> Task:
         """Convenience for update_task(task_id, CANCELLED)."""
         ...
