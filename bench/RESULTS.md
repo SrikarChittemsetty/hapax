@@ -259,6 +259,82 @@ ceiling, not a server's, and the useful part is the *shape* — near-linear to 4
 flat to 16, tail collapse at 32 — plus the fact that correctness never wavered
 at any point on the curve.
 
+## The same benchmark in Go
+
+`bench/go/` is a port of `bench/load.py`: goroutines and pgx instead of processes
+and psycopg, issuing **byte-for-byte the same SQL** (copied from
+`src/hapax/postgres.py` rather than reimplemented), splitting the same claim /
+commit measurement, using the same nearest-rank percentile, the same readiness
+barrier, and the same median-of-repeats. Any difference in the numbers is a
+difference in the client, not in what the database was asked to do.
+
+```bash
+cd bench/go && go run . --conninfo "postgres://user@127.0.0.1:5432/mdt" \
+    --tasks 20000 --workers 1,2,4,8,16,32 --repeat 5
+```
+
+**Result** — both harnesses run back to back on the same idle machine and the
+same Postgres, 20,000 tasks per level, median of 5 runs. Exactly-once verified at
+every level in both:
+
+| workers | Python tasks/s | Go tasks/s | Go advantage | Python claim p50 | Go claim p50 |
+|---|---|---|---|---|---|
+| 1 | 1,624 | **2,863** | 1.76× | 0.179 ms | 0.088 ms |
+| 2 | 2,294 | **4,986** | 2.17× | 0.194 ms | 0.097 ms |
+| 4 | 3,970 | **5,576** | 1.40× | 0.233 ms | 0.162 ms |
+| **8** | **5,202** | **7,345** | **1.41×** | 0.428 ms | 0.262 ms |
+| 16 | 4,704 | **6,732** | 1.43× | 0.846 ms | 0.465 ms |
+| 32 | 2,438 | **5,895** | 2.42× | 2.578 ms | 0.721 ms |
+
+Tail latency, which is where the two diverge most:
+
+| workers | Python claim p99 | Go claim p99 |
+|---|---|---|
+| 8 | 2.758 ms | 1.212 ms |
+| 16 | 14.227 ms | 12.744 ms |
+| 32 | **56.108 ms** | **27.775 ms** |
+
+### Reading it honestly
+
+**Go is faster, everywhere.** 1.4–2.4× the throughput and roughly half the claim
+latency at every concurrency level, rising to 3.6× lower claim latency at 32
+workers. None of that is surprising: a goroutine costs a few kilobytes where a
+Python worker costs a process, and pgx does less per operation than psycopg
+does. If the question is "which client can drive this database harder", the
+answer is Go, and the margin at peak is **41%**.
+
+**And it does not move the wall.** Both peak at *the same place* — 8 workers —
+and both degrade after it. Go raises the ceiling and leaves the shape alone.
+
+That is the useful finding, because it corroborates the bottleneck diagnosis
+above by an independent route. If the limit had been client-side — interpreter
+overhead, the GIL, per-object cost — then a client with none of those problems
+would have pushed the peak further right. It did not. The peak stayed at 8
+workers in both languages, which is what you would expect if the constraint is
+the commit path inside Postgres, exactly where `pg_stat_activity` said it was.
+
+**Where Go genuinely wins beyond raw speed:** it degrades far more gracefully.
+Past the peak, Python falls to 2,438 tasks/s at 32 workers while Go holds 5,895;
+Python's claim p99 reaches 56 ms against Go's 28 ms. Under overload the cheaper
+client wastes less.
+
+### Honest caveats
+
+- **This is not a controlled experiment isolating one variable.** Python spawns W
+  OS processes each holding one connection; Go runs W goroutines over a pool of W
+  connections. That difference *is* the comparison — two runtimes' natural
+  concurrency models driving identical SQL — but it means "Go is 1.4× faster"
+  should be read as "this Go program beat this Python program", not as a
+  language benchmark.
+- **The benchmark is noisy on a laptop and needs repeats.** At median-of-3 the
+  Python peak appeared at 4 workers with 3,134 tasks/s; at median-of-5 it moved
+  to 8 workers with 5,202. Anything drawn from a single run of this would be
+  fiction. Every number above is a median of five.
+- **Client and server share one 8 GB machine**, so both harnesses are competing
+  with the database they are measuring. These are this laptop's numbers.
+- The Go port is a *benchmark harness only*. It does not reimplement the store,
+  and no library code was changed for it.
+
 ## Roadmap
 
 The intended next comparison is a **Temporal-wrapped baseline** running the same

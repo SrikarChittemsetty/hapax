@@ -1,0 +1,2 @@
+# Build output; the harness is run with `go run .`
+loadgo

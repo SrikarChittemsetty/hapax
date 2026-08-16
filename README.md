@@ -185,16 +185,33 @@ Durability has a measurable cost, reported with percentiles (averages hide tail 
 
 The ~30–50× latency gap *is* the fsync-and-network tax for crash-survival — measured, not asserted.
 
-**Under concurrent load** — 20,000 tasks drained by N worker processes against one Postgres, median of 3 runs. Exactly-once is re-checked at every level:
+**Under concurrent load** — 20,000 tasks drained by N worker processes against one Postgres, median of 5 runs. Exactly-once is re-checked at every level:
 
-| workers | tasks/s | efficiency | claim p99 | commit p99 | exactly-once |
+| workers | tasks/s | claim p50 | claim p99 | commit p99 | exactly-once |
 |---|---|---|---|---|---|
-| 1 | 1,895 | 100% | 0.35 ms | 0.58 ms | ✓ |
-| **4** | **4,949** | 65% | 0.61 ms | 0.93 ms | ✓ |
-| 16 | 3,653 | 12% | 28.0 ms | 34.0 ms | ✓ |
-| 32 | 2,512 | 4% | 121 ms | 130 ms | ✓ |
+| 1 | 1,624 | 0.179 ms | 0.62 ms | 1.35 ms | ✓ |
+| 4 | 3,970 | 0.233 ms | 1.98 ms | 5.41 ms | ✓ |
+| **8** | **5,202** | 0.428 ms | 2.76 ms | 7.31 ms | ✓ |
+| 16 | 4,704 | 0.846 ms | 14.2 ms | 15.9 ms | ✓ |
+| 32 | 2,438 | 2.578 ms | 56.1 ms | 66.5 ms | ✓ |
 
-Peak is ~4,950 tasks/s at 4 workers; past that, throughput falls and the tail collapses. Writing this benchmark is what found the worst bug in the project — every claim was sequentially scanning and sorting the entire queue, because the index was on the filter column instead of the sort key. Fixing it took a claim from **1.808 ms to 0.113 ms** and peak throughput from 2,950 to 4,950 tasks/s. Full diagnosis, including what the ceiling turned out to be and the three candidates that were ruled out with evidence, is in [`bench/RESULTS.md`](bench/RESULTS.md).
+*(Median of 5 matters: at median-of-3 this same benchmark put the peak at 4 workers and 3,134 tasks/s. It is noisy on a laptop, and a single run of it would be fiction.)*
+
+**The same benchmark in Go.** [`bench/go/`](bench/go/) is a port using goroutines and pgx, issuing byte-for-byte the same SQL so the comparison is about the client and nothing else. Both run back to back on the same machine, 20,000 tasks per level, median of 5:
+
+| workers | Python | Go | Go advantage |
+|---|---|---|---|
+| 1 | 1,624/s | **2,863/s** | 1.76× |
+| **8** | **5,202/s** | **7,345/s** | **1.41×** |
+| 32 | 2,438/s | **5,895/s** | 2.42× |
+
+```bash
+cd bench/go && go run . --conninfo "postgres://user@127.0.0.1:5432/mdt" --tasks 20000 --workers 1,2,4,8,16,32 --repeat 5
+```
+
+Go is faster everywhere — 1.4–2.4× throughput, roughly half the claim latency — **and both peak at exactly the same place, 8 workers.** That is the interesting part: Go raises the ceiling and leaves the shape alone. If the limit had been client-side, a client with no interpreter and no GIL would have pushed the peak further right; it didn't, which independently corroborates that the wall is the commit path inside Postgres. Full tables, tail-latency comparison and caveats — including that this is two runtimes' concurrency models rather than a controlled single-variable experiment — in [`bench/RESULTS.md`](bench/RESULTS.md).
+
+Peak is ~5,200 tasks/s (Python) at 8 workers; past that, throughput falls and the tail collapses. Writing this benchmark is what found the worst bug in the project — every claim was sequentially scanning and sorting the entire queue, because the index was on the filter column instead of the sort key. Fixing it took a claim from **1.808 ms to 0.113 ms** and peak throughput from 2,950 to 4,950 tasks/s. Full diagnosis, including what the ceiling turned out to be and the three candidates that were ruled out with evidence, is in [`bench/RESULTS.md`](bench/RESULTS.md).
 
 **Comparative correctness** — this system vs. the naive alternative (application-level check-then-insert) under a retry storm of N simultaneous same-key requests. Duplicate charges scale as ≈ N−1 for the naive approach; this system is exactly-once at every level:
 

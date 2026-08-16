@@ -47,3 +47,23 @@ jobs:
 
       - name: Benchmark (smoke)
         run: python bench/benchmark.py --conninfo "$HAPAX_TEST_DATABASE_URL" --iterations 200 --warmup 50
+
+      # The Go load harness is a benchmark, not library code, but it issues the
+      # same SQL as the Python store — so if a schema change breaks it, that is
+      # worth finding here rather than the next time someone runs a comparison.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: bench/go/go.sum
+
+      - name: Build and vet the Go harness
+        working-directory: bench/go
+        run: |
+          go vet ./...
+          go build ./...
+
+      - name: Go harness smoke run
+        working-directory: bench/go
+        run: |
+          go run . --conninfo "postgres://postgres:postgres@127.0.0.1:5432/mdt" \
+            --tasks 500 --workers 1,4
