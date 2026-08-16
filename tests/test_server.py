@@ -232,3 +232,29 @@ def test_a_task_outlives_the_server_that_created_it(pg_store, pg_conninfo, ledge
     finally:
         survivor.kill()
         survivor.wait(timeout=10)
+
+
+def test_a_running_task_is_not_claimable_until_the_server_stops_renewing(pg_store, pg_conninfo):
+    """A live server's work must not be handed to a dispatcher underneath it.
+
+    The exactly-once guarantee would survive that — terminal states and the
+    single-transaction commit see to it — but a second worker duplicating
+    in-progress work is still waste, and the row would be saying "nobody is
+    doing this" while somebody is.
+    """
+    from hapax.server import HapaxServer, Tool
+
+    tool = Tool("slow", "Takes a moment.", {"type": "object"}, lambda a: {"ok": True})
+    server = HapaxServer(pg_store, tools=[tool], run_in_background=False, lease_seconds=60)
+
+    created = server.handle(rpc("tools/call", {"name": "slow", "task": {}}))["result"]
+
+    # It ran inline and is terminal, so it is unclaimable for the strongest
+    # reason; the lease is what covers the window before that.
+    assert pg_store.get_task(created["taskId"]).state is TaskState.COMPLETED
+    assert pg_store.claim_task(lease_seconds=1) is None
+
+    # And a task mid-flight (still working, lease held) is equally off-limits.
+    task = pg_store.create_task({"tool": "slow"}, idempotency_key="held")
+    pg_store.heartbeat(task.id, lease_seconds=60)
+    assert pg_store.claim_task(lease_seconds=1) is None

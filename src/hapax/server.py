@@ -93,10 +93,15 @@ class HapaxServer:
         tools: Iterable[Tool] = (),
         *,
         run_in_background: bool = True,
+        lease_seconds: float = 300,
     ) -> None:
         self.store = store
         self.protocol = TasksProtocol(store)
         self.tools = {t.name: t for t in tools}
+        # Long, because this lease says "a live server is running this tool",
+        # and tool calls are allowed to be slow. A dispatcher only steals the
+        # task if the whole server has been gone for this long.
+        self.lease_seconds = lease_seconds
         # Tests run the work inline so they can assert on the outcome without
         # waiting on a thread; the real server runs it off the request path.
         self.run_in_background = run_in_background
@@ -216,6 +221,16 @@ class HapaxServer:
     # --- running the work -----------------------------------------------------
 
     def _start(self, tool: Tool, arguments: dict[str, Any], task_id: str) -> None:
+        # Take a lease before starting. Without one the task looks unclaimed for
+        # as long as the tool runs, so a dispatcher sharing this database would
+        # be entitled to pick it up and run it alongside us. That would not
+        # double the side effect — terminal states and the single-transaction
+        # commit see to that — but it would waste a worker doing work already in
+        # progress, and "nobody is doing this" would be a false statement about
+        # the row. If the server dies, nothing renews the lease and the task
+        # becomes claimable on its own, which is exactly the intent.
+        self.store.heartbeat(task_id, lease_seconds=self.lease_seconds)
+
         def run() -> None:
             try:
                 result = tool.handler(arguments)
