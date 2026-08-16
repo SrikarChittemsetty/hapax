@@ -169,6 +169,7 @@ python bench/chaos.py --conninfo "…" --trials 500 --recovery dispatcher
 - **`tests/test_crash_recovery.py`** — spawns the worker as a real OS process, kills it with an actual `SIGKILL` at each commit boundary (`before_commit`, `after_commit`), and asserts the ledger holds exactly one row across the crash + recovery. Also covers a crash-loop (repeated recovery stays exactly-once).
 - **`tests/test_concurrency.py`** — launches two workers on the same task at the same instant; the row lock serializes them and the charge still happens exactly once.
 - **`bench/chaos.py`** — because those three crash points were *chosen*, this kills the worker at a uniformly random moment across its measured lifetime instead. 500 randomized kills: **0 double charges, 0 lost charges**. The identical harness pointed at the naive control group (`--strategy naive`) produces **121 double charges out of 500**.
+- **`tests/test_server.py`** — drives the MCP server, then spawns it for real, `SIGKILL`s it mid-flight, and asks a **different** server process against the same database for the result. An in-memory store passes every other test in that file and fails this one.
 - **`tests/test_store_contract.py`** — the behavioral spec, run against both backends.
 - **`tests/test_state_machine.py`** — every legal transition, and every illegal move out of a terminal state.
 
@@ -224,7 +225,36 @@ export HAPAX_TEST_DATABASE_URL="host=127.0.0.1 port=5432 user=postgres dbname=md
 
 ## Speaking the protocol
 
-`protocol.py` is a thin SEP-2663 wire adapter: it maps store operations to the
+There is an actual server. `python -m hapax.server --conninfo "…"` speaks
+JSON-RPC 2.0 over stdio — `initialize`, `tools/list`, `tools/call`, `tasks/get`,
+`tasks/list`, `tasks/cancel` — with every task living in Postgres instead of a
+dictionary that dies with the process:
+
+```
+→ {"method":"initialize"}
+← {"serverInfo":{"name":"hapax"},"capabilities":{"experimental":{"tasks":{...}}}}
+
+→ {"method":"tools/call","params":{"name":"charge","arguments":{"customer":"demo","amount":50},
+                                   "task":{"idempotencyKey":"demo-1"}}}
+← {"resultType":"task","taskId":"task_cbbf8ac…","status":"working"}
+
+→ (the identical request again, as a retrying client would send it)
+← {"resultType":"task","taskId":"task_cbbf8ac…","status":"working"}     ← same task
+```
+
+An ordinary `tools/call` blocks until the tool returns. A **task-augmented** one
+returns a task id immediately and runs the work off the request path, so the
+agent polls `tasks/get` for it — and because the task is in Postgres, *"the agent
+polls later"* and *"the server was restarted in between"* are the same case.
+[`tests/test_server.py`](tests/test_server.py) proves that literally: it spawns
+the server, starts a task, `SIGKILL`s the process, spawns a **different** server
+against the same database, and asks it for the result. An in-memory store passes
+every other test in that file and fails this one.
+
+Dispatch is separated from transport, so the whole protocol surface is tested
+with plain dicts and only the two durability tests need a pipe.
+
+`protocol.py` is the thin SEP-2663 wire adapter underneath it: it maps store operations to the
 `tasks/*` result shapes an MCP server puts on the wire (`create` → task
 envelope, `tasks/get` → DetailedTask with the result inlined on completion,
 `tasks/cancel` → ack), with no transport coupling so it stays testable with plain
@@ -233,9 +263,9 @@ task created and completed through the adapter is still retrievable, with its
 result, from a fresh store instance pointed at the same database (i.e. after a
 restart).
 
-Honest scope: this targets the SEP-2663 wire *fields*, not full protocol
-conformance (capability negotiation, notifications, and the input-required loop
-are roadmap). The official Python SDK does not yet implement Tasks
+Honest scope: this implements the SEP-2663 methods and wire *fields*, not the
+whole of MCP — there is no capability negotiation beyond advertising the
+extension, no progress notifications, and no input-required round trip. The official Python SDK does not yet implement Tasks
 ([python-sdk #2806](https://github.com/modelcontextprotocol/python-sdk/issues/2806) /
 [#3005](https://github.com/modelcontextprotocol/python-sdk/pull/3005)); the intent
 is to conform to that `TaskStore` interface once it lands.
@@ -257,7 +287,6 @@ That's the document to read alongside the source (and the one to have in mind fo
 
 - Temporal-wrapped baseline benchmark (answer "doesn't Temporal already do this?" with numbers).
 - Multiple dispatcher processes sharing a fleet, with the lease length tuned per workload rather than fixed.
-- A thin MCP server binding so it drops into a real agent runtime.
 
 ## Why it exists
 
