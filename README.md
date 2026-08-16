@@ -270,7 +270,7 @@ extension, no progress notifications, and no input-required round trip. The offi
 [#3005](https://github.com/modelcontextprotocol/python-sdk/pull/3005)); the intent
 is to conform to that `TaskStore` interface once it lands.
 
-## Design decisions
+## The full decision log
 
 Every major choice — with the alternatives considered, why they were rejected,
 and the failure mode each guards against — is written up in [`DESIGN.md`](DESIGN.md).
