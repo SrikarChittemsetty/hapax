@@ -156,21 +156,90 @@ external-boundary dedup handle.
 
 ---
 
-## 8. Pull-based recovery (terminal-state check), not a push scheduler
+## 8. Recovery is lease-based, and absence of a heartbeat is the signal
 
-**Chosen:** recovery happens when a worker re-runs a task and observes it's
-already terminal (no-op) or still `working` (re-run cleanly).
+**Chosen:** a worker claims a task by writing a lease deadline into the row. If
+it finishes, the task goes terminal and stops being claimable. If it dies,
+nothing renews the deadline, the deadline passes, and the task returns to the
+claimable pool for a dispatcher to pick up.
 
-**Alternatives rejected / deferred:**
-- *A push-based scheduler that detects orphaned `working` tasks (a worker died)
-  and auto-requeues them.* Genuinely better for a production system — it's on the
-  roadmap. Deferred because it needs liveness tracking (heartbeats / lease
-  expiry) that's a project in itself, and the exactly-once *core* is
-  demonstrable without it.
+*(This section previously described recovery as deliberately pull-based — a
+worker re-running a task and observing terminal state — with a push scheduler
+listed as deferred roadmap. That was true until leases landed, and the honest
+reason for the change is that the old design's gap was real: a task whose worker
+died stayed `working` for ever unless something outside the system happened to
+retry it, which meant the guarantee quietly depended on a queue redelivery or a
+human noticing.)*
 
-**Failure mode it guards against (and its limit):** re-running a task is always
-safe (idempotent). What it does *not* yet do: automatically notice that a worker
-died and nobody will retry. That honest gap is stated in the README.
+**Alternatives rejected:**
+- *A liveness table — workers register, heartbeat, get marked dead.* Rejected:
+  it is a second source of truth about who is alive, and it can disagree with
+  reality in both directions. A lease on the task row cannot: the fact that
+  matters (is anyone working on this?) is stored on the thing it is a fact about.
+- *`SELECT` an expired task, then `UPDATE` to claim it.* Rejected for the same
+  reason `create_task` does not check-then-insert: two dispatchers both see the
+  same lapsed task and both claim it. Claiming is one statement —
+  `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1)`.
+- *Plain `FOR UPDATE` without `SKIP LOCKED`.* Rejected: a second dispatcher would
+  block on the row the first is claiming instead of moving on to the next task,
+  turning a fleet into a queue.
+
+**Failure mode it guards against:** work stranded for ever because the only
+process that knew about it died. Measured: 500 randomized kills recovered with
+nothing retrying, 0 double charges, p50 20 ms crash-to-recovery.
+
+**Its limit, stated plainly:** leases are wall-clock. A worker that is merely
+paused — a long GC, a stopped container, a clock jump — can lose its lease while
+still alive, and its task will be handed to someone else. That is survivable here
+*because* the effect is exactly-once no matter how many workers run it, which is
+rather the point; but it makes the lease length a real tuning decision.
+
+---
+
+## 8a. The claim index is on the sort key, not the filter column
+
+**Chosen:** `CREATE INDEX idx_tasks_claim_order ON tasks (created_at) WHERE
+state = 'working'`, with the lease check applied as a filter while scanning.
+
+**What was there first, and why it was wrong:** the obvious index is on
+`lease_expires_at` — it is the column in the `WHERE` clause. But the claim also
+says `ORDER BY created_at`, and an index on the filter column cannot serve that
+ordering, so Postgres sequentially scanned every claimable row and quicksorted
+all of them to pick one. The cost of a claim therefore grew with the depth of the
+queue, which the load benchmark caught as single-worker throughput falling from
+1,714 to 560 tasks/s purely as the queue got longer.
+
+Indexing the sort key instead lets the claim walk rows in `created_at` order and
+stop at the first one it can take: **1.808 ms → 0.113 ms per claim**, peak
+throughput 2,950 → 4,950 tasks/s.
+
+**A knock-on that had to change with it:** the predicate was
+`lease_expires_at IS NULL OR lease_expires_at < now()`. The `OR` form stopped the
+planner treating it as a simple filter, so it became
+`coalesce(lease_expires_at, '-infinity') < now()`.
+
+**Its limit:** this is the right trade while most queued tasks are unleased,
+which is the normal state. If nearly everything were leased at once, the scan
+would walk further before finding a free row.
+
+---
+
+## 8b. Schema migration checks before it reaches for DDL
+
+**Chosen:** `apply_schema` queries `information_schema` first and only runs DDL
+when the schema is genuinely behind, with a Postgres advisory lock serializing
+the processes that do need to migrate.
+
+**Why it is not just `CREATE ... IF NOT EXISTS` everywhere:** every store applies
+the schema on connect, so N workers starting together all run the same DDL. That
+is harmless for `CREATE ... IF NOT EXISTS`, and *not* harmless for
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, which takes an AccessExclusiveLock on
+the table before it can decide there is nothing to do. Two workers doing that
+simultaneously deadlock each other — which is exactly how this was found, by the
+two-workers-racing test starting to fail the moment the lease columns were added.
+
+**Failure mode it guards against:** a deadlock on startup, and an exclusive table
+lock taken on the hot path by every process that connects.
 
 ---
 
@@ -224,3 +293,37 @@ for *any* failure. When binding to the official wire protocol (see `protocol.py`
 and the roadmap), a tool-level error maps to `completed` with an error result,
 per the spec — the store's `failed` state then represents infrastructure/JSON-RPC
 failures. This is called out so the mapping is deliberate, not accidental.
+
+---
+
+## 13. The MCP server separates dispatch from transport
+
+**Chosen:** `HapaxServer.handle(request_dict) -> response_dict` holds the entire
+protocol surface; `serve_stdio()` is a thin loop that reads lines, calls it, and
+writes lines.
+
+**Alternatives rejected:**
+- *Handle framing and dispatch together in the read loop.* Rejected: every
+  protocol test would then need a pipe, a subprocess and a timeout, which makes
+  the tests slow, flaky and bad at saying what broke. As split, thirteen tests
+  drive plain dicts and only the two that genuinely need a process — the ones
+  that kill the server — pay for one.
+- *Run task work on the request thread.* Rejected: that is what a task-augmented
+  call exists to avoid. The point of returning a task id is that the caller does
+  not wait, so the work runs off the request path and the client polls
+  `tasks/get`.
+
+**Failure mode it guards against:** the one the project exists for, now visible
+at the protocol level. Because the task lives in Postgres, *"the agent polls
+later"* and *"the server was restarted in between"* are the same case —
+`tests/test_server.py` spawns the server, starts a task, `SIGKILL`s it, spawns a
+different server against the same database and asks that one for the result. An
+in-memory store passes every other test in that file and fails this one.
+
+A retried `tools/call` carrying the same idempotency key returns the same
+`taskId` and does not re-run the tool, so the guarantee is observable from
+outside the process rather than only in the store's own tests.
+
+**Honest scope:** the methods and wire fields, not the whole of MCP. No
+capability negotiation beyond advertising the extension, no progress
+notifications, no input-required round trip.
