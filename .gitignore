@@ -7,3 +7,9 @@ dist/
 build/
 .env
 .DS_Store
+
+# Terraform state contains the generated RDS password in plaintext
+deploy/aws/*.tfstate
+deploy/aws/*.tfstate.*
+deploy/aws/.terraform/
+deploy/aws/terraform.tfvars

@@ -1,0 +1,7 @@
+# Terraform state contains the generated RDS password in plaintext.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+crash.log

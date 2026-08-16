@@ -287,6 +287,23 @@ extension, no progress notifications, and no input-required round trip. The offi
 [#3005](https://github.com/modelcontextprotocol/python-sdk/pull/3005)); the intent
 is to conform to that `TaskStore` interface once it lands.
 
+## Deploying it
+
+[`DEPLOY.md`](DEPLOY.md) has Terraform for a free-tier AWS deployment — EC2 + RDS
+Postgres + ECR, no NAT gateway, no load balancer, nothing above micro — with the
+billing alarm to set *before* provisioning, a cost breakdown for both the legacy
+12-month free tier and the credit-based model AWS moved to in July 2025, and a
+teardown that leaves nothing billable behind.
+
+What gets deployed is the **dispatcher**, not the MCP server: an MCP stdio server
+is spawned per session by an agent host and has no port to expose, whereas the
+dispatcher is the piece that has to run continuously for a task to outlive
+whatever created it.
+
+Nothing has been applied to an AWS account. The config validates and the
+container is built and tested locally against a real Postgres; that boundary is
+stated explicitly at the end of DEPLOY.md.
+
 ## The full decision log
 
 Every major choice — with the alternatives considered, why they were rejected,
