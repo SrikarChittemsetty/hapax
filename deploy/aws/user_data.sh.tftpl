@@ -65,5 +65,57 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now hapax.service
+echo "hapax started"
+
+# --- Aporia ------------------------------------------------------------------
+# Only when enabled. Runs alongside the Hapax dispatcher on the same instance;
+# see aporia.tf for why the instance has to be at least 2 GB.
+%{ if enable_aporia ~}
+APORIA_REPO="${aporia_repo}"
+APORIA_TAG="${aporia_tag}"
+SSM_ANTHROPIC="${ssm_anthropic}"
+
+docker pull "$APORIA_REPO:$APORIA_TAG"
+
+# The Anthropic key is created empty by Terraform and set out of band, so it may
+# legitimately still be the placeholder. Aporia degrades to unclassified results
+# rather than failing, so a missing key is a warning, not a fatal error.
+ANTHROPIC_KEY="$(aws ssm get-parameter --name "$SSM_ANTHROPIC" --with-decryption \
+  --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
+
+if [ -z "$ANTHROPIC_KEY" ] || [ "$ANTHROPIC_KEY" = "PLACEHOLDER-set-with-aws-ssm-put-parameter" ]; then
+  echo "WARNING: Anthropic key not set; Aporia will return passages unclassified." >&2
+  ANTHROPIC_KEY=""
+fi
+
+printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_KEY" > /etc/hapax/aporia.env
+chmod 0600 /etc/hapax/aporia.env
+
+cat > /etc/systemd/system/aporia.service <<UNIT
+[Unit]
+Description=Aporia stance-aware philosophy search
+After=docker.service
+Requires=docker.service
+
+[Service]
+Restart=always
+RestartSec=5
+EnvironmentFile=/etc/hapax/aporia.env
+ExecStartPre=-/usr/bin/docker rm -f aporia
+ExecStart=/usr/bin/docker run --rm --name aporia \
+  -p 8080:8080 \
+  -e ANTHROPIC_API_KEY \
+  --memory=1200m \
+  --log-driver=json-file --log-opt max-size=10m --log-opt max-file=3 \
+  $APORIA_REPO:$APORIA_TAG
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now aporia.service
+echo "aporia started"
+%{ endif ~}
 
 echo "bootstrap complete"

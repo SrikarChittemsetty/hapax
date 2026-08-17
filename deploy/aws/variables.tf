@@ -112,3 +112,58 @@ variable "image_tag" {
   type        = string
   default     = "latest"
 }
+
+# --- Aporia (the second service) ---------------------------------------------
+
+variable "enable_aporia" {
+  description = <<-EOT
+    Deploy Aporia alongside Hapax on the same instance.
+
+    Turning this on changes the sizing requirement: Aporia peaks at 769 MB
+    (measured), so with the Hapax dispatcher and the OS the instance needs about
+    1.1 GB. Set instance_type to t3.small or larger — a t2.micro's 1 GB will
+    appear to work and then OOM under load.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "aporia_ingress_cidr" {
+  description = <<-EOT
+    Who may reach Aporia directly on 8080 when there is no load balancer.
+    Defaults to nobody-in-particular on purpose; set your own /32 for testing,
+    or turn on enable_load_balancer for a public demo.
+  EOT
+  type        = string
+  default     = "127.0.0.1/32"
+}
+
+variable "enable_load_balancer" {
+  description = <<-EOT
+    Put an ALB in front of Aporia for a real https:// URL.
+
+    ~$16/month plus LCU and in no free tier — the most expensive thing in this
+    stack. Worth it when the link goes on a resume; not worth it otherwise.
+    Requires domain_name for TLS; without one it serves plain HTTP.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "domain_name" {
+  description = <<-EOT
+    Hostname for the certificate, e.g. "aporia.example.com". Empty means no
+    ACM certificate and the balancer serves HTTP only.
+
+    Validation is DNS-based, and the records are an output of this stack —
+    create them in whatever zone owns the domain, then apply completes.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "aporia_image_tag" {
+  description = "Container image tag for Aporia in ECR."
+  type        = string
+  default     = "latest"
+}

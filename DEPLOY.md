@@ -172,6 +172,26 @@ Assuming a **legacy account inside its 12 months**, one instance running 24/7:
 | Data transfer out | negligible | 100 GB/month | **$0** |
 | **Total** | | | **$0/month** |
 
+### With Aporia and a load balancer
+
+Free tier does not cover this shape, and it is not meant to — it is the
+configuration for an account with credits:
+
+| Resource | Cost/month |
+|---|---|
+| EC2 `t3.small` (2 GB, both services) | ~$15 |
+| RDS `db.t3.micro` | $0 while in the free tier, else ~$12 |
+| Application Load Balancer | ~$16 + LCU |
+| ACM certificate | $0 |
+| ECR (605 MB Aporia + 48 MB Hapax) | ~$0.02 past the 500 MB allowance |
+| **Total** | **~$31–43/month** |
+
+Against $10,000 of credits that is roughly two years. Two things to hold onto
+anyway: credits **mask** real charges, so keep the $1 billing alarm exactly as
+it is — with credits applied your actual charges should still read $0 — and put
+the credit expiry date in a calendar, because an always-on stack starts billing
+silently the day they run out.
+
 Deliberately absent, with what each would have cost:
 
 | Not used | Why | Would cost |
@@ -310,6 +330,60 @@ paying after teardown. If you add it, set `retention_in_days` and add the log
 group to the teardown checklist. This deployment leaves it out for that reason.
 
 ---
+
+## Adding Aporia to the same stack
+
+Off by default (`enable_aporia = false`). Turning it on puts Aporia's container
+on the same instance as the Hapax dispatcher.
+
+**Sizing is measured, not guessed.** Aporia idles at 716 MB and peaks at 769 MB
+(`docker stats`, linux/amd64, 2026-08-17). With the dispatcher (~50 MB) and
+Amazon Linux (~200 MB) the instance needs about **1.1 GB**, so:
+
+| instance | RAM | verdict |
+|---|---|---|
+| `t2.micro` / `t3.micro` | 1 GB | **rejected at plan time** — ~100 MB headroom for a 769 MB process is an OOM waiting to happen |
+| `t3.small` | 2 GB | comfortable; the recommended setting |
+| `t3.medium` | 4 GB | unnecessary |
+
+A `lifecycle.precondition` on the instance refuses `enable_aporia` on any
+`*.micro`, so this fails in `terraform plan` rather than at 3am in a health
+check. (Aporia's own DEPLOY.md used to claim 1.5 GB, which would have pushed
+this to a `t3.medium` for nothing.)
+
+```hcl
+# terraform.tfvars
+enable_aporia        = true
+instance_type        = "t3.small"
+enable_load_balancer = true              # ~$16/month, gives a real https:// URL
+domain_name          = "aporia.yourdomain.com"
+```
+
+```bash
+terraform apply
+# ACM validation is DNS-based and this stack does not own your zone, so:
+terraform output acm_validation_records   # create these, then apply completes
+
+# Build for the instance's architecture, not your laptop's:
+REPO=$(terraform output -raw aporia_ecr_repository_url)
+cd /path/to/aporia && docker build --platform linux/amd64 -t "$REPO:latest" . && docker push "$REPO:latest"
+
+# The Anthropic key is created empty so it never enters tfstate:
+terraform output -raw set_anthropic_key_command   # then run it
+```
+
+Without a key Aporia still serves — it returns passages unclassified rather
+than failing, which is the same graceful degradation the local app has.
+
+### Before it is public
+
+`/search` costs money per novel claim: one batched Claude call over `k`
+passages. `api/limits.py` bounds that — `k` is clamped to 50, queries to 300
+characters, and each client gets 20 searches a minute. The client key comes from
+`X-Forwarded-For`, which is **only trustworthy behind the load balancer**; if
+you expose port 8080 directly the header is spoofable and the limit is
+decorative. That is the real reason to prefer `enable_load_balancer = true` for
+anything public, ahead of the nicer URL.
 
 ## Teardown
 

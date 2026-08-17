@@ -63,6 +63,11 @@ resource "aws_instance" "app" {
     ecr_repo    = aws_ecr_repository.app.repository_url
     image_tag   = var.image_tag
     ssm_db_path = aws_ssm_parameter.db_url.name
+
+    enable_aporia = var.enable_aporia
+    aporia_repo   = var.enable_aporia ? aws_ecr_repository.aporia[0].repository_url : ""
+    aporia_tag    = var.aporia_image_tag
+    ssm_anthropic = var.enable_aporia ? aws_ssm_parameter.anthropic_key[0].name : ""
   })
 
   # Changing user_data on an existing instance does nothing unless it is
@@ -71,6 +76,17 @@ resource "aws_instance" "app" {
   user_data_replace_on_change = true
 
   tags = { Name = "${var.project}-app" }
+
+  lifecycle {
+    # Aporia peaks at 769 MB (measured). A micro instance has 1 GB, which after
+    # Amazon Linux leaves ~100 MB for a 769 MB process — it boots, serves a few
+    # requests, and then the OOM killer takes it. Catching that at plan time is
+    # considerably cheaper than diagnosing it at 3am from a health check.
+    precondition {
+      condition     = !var.enable_aporia || !can(regex("micro$", var.instance_type))
+      error_message = "enable_aporia needs >= 2 GB RAM; ${var.instance_type} has 1 GB. Use t3.small or larger."
+    }
+  }
 
   depends_on = [aws_db_instance.main]
 }

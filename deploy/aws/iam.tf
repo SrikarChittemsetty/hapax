@@ -42,7 +42,10 @@ resource "aws_iam_role_policy" "ecr_pull" {
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchCheckLayerAvailability",
         ]
-        Resource = aws_ecr_repository.app.arn
+        Resource = concat(
+          [aws_ecr_repository.app.arn],
+          var.enable_aporia ? [aws_ecr_repository.aporia[0].arn] : [],
+        )
       },
     ]
   })
@@ -55,9 +58,14 @@ resource "aws_iam_role_policy" "ssm_read" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameter", "ssm:GetParameters"]
-      Resource = aws_ssm_parameter.db_url.arn
+      Effect = "Allow"
+      Action = ["ssm:GetParameter", "ssm:GetParameters"]
+      # Scoped to exactly the parameters this instance needs, by ARN. The
+      # Anthropic key only appears when Aporia is deployed.
+      Resource = concat(
+        [aws_ssm_parameter.db_url.arn],
+        var.enable_aporia ? [aws_ssm_parameter.anthropic_key[0].arn] : [],
+      )
     }]
   })
 }
