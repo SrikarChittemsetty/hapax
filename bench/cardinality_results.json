@@ -1,0 +1,44 @@
+[
+  {
+    "tasks": 100,
+    "label_task_id": false,
+    "series": 22,
+    "scrape_bytes": 3286,
+    "collect_ms": 1.07
+  },
+  {
+    "tasks": 100,
+    "label_task_id": true,
+    "series": 319,
+    "scrape_bytes": 52330,
+    "collect_ms": 3.69
+  },
+  {
+    "tasks": 1000,
+    "label_task_id": false,
+    "series": 22,
+    "scrape_bytes": 3304,
+    "collect_ms": 0.42
+  },
+  {
+    "tasks": 1000,
+    "label_task_id": true,
+    "series": 3019,
+    "scrape_bytes": 496945,
+    "collect_ms": 39.47
+  },
+  {
+    "tasks": 10000,
+    "label_task_id": false,
+    "series": 22,
+    "scrape_bytes": 3320,
+    "collect_ms": 3.91
+  },
+  {
+    "tasks": 10000,
+    "label_task_id": true,
+    "series": 30019,
+    "scrape_bytes": 4942959,
+    "collect_ms": 825.92
+  }
+]

@@ -8,6 +8,14 @@ dependencies = []
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]
+# Metrics and traces. Kept optional so the core install stays dependency-free —
+# src/hapax/telemetry.py degrades every call to a no-op when these are absent.
+otel = [
+  "opentelemetry-api>=1.27",
+  "opentelemetry-sdk>=1.27",
+  "opentelemetry-exporter-prometheus>=0.48b0",
+  "prometheus-client>=0.21",
+]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "testcontainers[postgres]>=4.0", "mypy>=1.13"]
 
 [build-system]
