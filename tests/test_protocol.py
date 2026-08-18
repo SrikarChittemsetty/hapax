@@ -45,7 +45,9 @@ def test_ttl_is_reported_in_ms(proto):
 def test_get_working_task(proto):
     task_id = proto.create_augmented("x", {})["taskId"]
     got = proto.get(task_id)
-    assert got["resultType"] == "task"
+    # Always "complete" on a get — it marks the response's own shape, not the
+    # task's progress. Only the creation envelope says "task".
+    assert got["resultType"] == "complete"
     assert got["status"] == "working"
 
 

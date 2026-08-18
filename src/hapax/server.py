@@ -3,9 +3,19 @@
 `protocol.py` maps store operations to SEP-2663 result shapes, but nothing served
 them, which left the obvious question unanswered: can an agent runtime actually
 talk to this? This is the answer — a JSON-RPC 2.0 server over stdio that speaks
-`initialize`, `tools/list`, `tools/call`, `tasks/get`, `tasks/list` and
-`tasks/cancel`, with every task living in Postgres rather than in a dictionary
-that dies with the process.
+`initialize`, `tools/list`, `tools/call`, `tasks/get`, `tasks/update` and
+`tasks/cancel` (the surface of the finalized `io.modelcontextprotocol/tasks`
+extension; `tasks/list` was removed from the spec and is not served), with every
+task living in Postgres rather than in a dictionary that dies with the process.
+
+Task creation is server-directed, as the final design requires: the client
+declares the tasks extension in its `initialize` capabilities, and from then on
+the *server* decides per-request whether a `tools/call` returns its result
+inline or as a task envelope. A client that never declared the capability never
+sees an envelope — the spec's MUST NOT — so the old per-request `task` opt-in
+parameter is gone along with the `tools/list` warmup it required. The `task`
+parameter is still *read* if a client sends one, for exactly one field:
+`idempotencyKey`, which Hapax honours as the dedup key for retried calls.
 
     python -m hapax.server --conninfo "host=127.0.0.1 dbname=hapax"
 
@@ -43,9 +53,13 @@ from .protocol import TasksProtocol
 from .store import TaskStore
 from .task import TaskState
 
-PROTOCOL_VERSION = "2025-06-18"
+PROTOCOL_VERSION = "2026-07-28"
 SERVER_NAME = "hapax"
 SERVER_VERSION = "0.1.0"
+
+# The extension identifier SEP-2663 assigns; capability negotiation and the
+# task-augmentation decision both key on it.
+TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
 
 # JSON-RPC 2.0 error codes. -32000..-32099 is the reserved implementation range.
 PARSE_ERROR = -32700
@@ -106,6 +120,11 @@ class HapaxServer:
         # waiting on a thread; the real server runs it off the request path.
         self.run_in_background = run_in_background
         self._threads: list[threading.Thread] = []
+        # Whether the connected client declared the tasks extension at
+        # initialize. Until it does, tools/call MUST run inline — returning a
+        # task envelope to a client that never negotiated the extension is an
+        # invalid response by the spec's own words.
+        self._client_supports_tasks = False
 
     # --- the one public entry point -------------------------------------------
 
@@ -127,8 +146,11 @@ class HapaxServer:
                 "tools/list": self._tools_list,
                 "tools/call": self._tools_call,
                 "tasks/get": self._tasks_get,
-                "tasks/list": self._tasks_list,
+                "tasks/update": self._tasks_update,
                 "tasks/cancel": self._tasks_cancel,
+                # No tasks/list: removed in the finalized extension — a server
+                # cannot define which caller a listing should be scoped to, so
+                # serving one is an information leak wearing a feature's name.
             }.get(method)
 
             if handler is None:
@@ -155,20 +177,20 @@ class HapaxServer:
     # --- methods --------------------------------------------------------------
 
     def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        # The single handshake point the redesign consolidated everything into:
+        # the client declares the extension here, and that declaration alone
+        # decides whether this connection ever sees a task envelope. No
+        # per-request opt-in, no tool-level flags, no tools/list warmup.
+        client_caps = params.get("capabilities") or {}
+        extensions = client_caps.get("extensions") or {}
+        self._client_supports_tasks = TASKS_EXTENSION in extensions
+
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "capabilities": {
                 "tools": {"listChanged": False},
-                # Advertising the extension is what tells a client it may ask for
-                # a tool call to be run as a task rather than inline.
-                "experimental": {
-                    "tasks": {
-                        "requests": ["tools/call"],
-                        "cancel": True,
-                        "list": True,
-                    }
-                },
+                "extensions": {TASKS_EXTENSION: {}},
             },
         }
 
@@ -182,14 +204,20 @@ class HapaxServer:
         if tool is None:
             raise ValueError(f"unknown tool: {name}")
 
-        task_params = params.get("task")
-        if task_params is None:
-            # An ordinary call: run it now and return the content inline.
+        # Server-directed creation. The server is the sole decider, and this
+        # server's policy is simple: a client that negotiated the extension
+        # gets the durable path, because surviving a crash between call and
+        # result is the entire reason to point an agent at Hapax. A client
+        # that did not negotiate it MUST get its result inline — returning an
+        # envelope it never agreed to parse is an invalid response.
+        if not self._client_supports_tasks:
             return _content(tool.handler(arguments))
 
-        # Task-augmented. The store dedups on the idempotency key, so a client
-        # that retries this exact request gets the original task back rather
-        # than starting the work twice — which is the entire point.
+        # `task` is no longer how a client requests a task — but if one is
+        # present, its idempotencyKey is honoured as the dedup key. That field
+        # is Hapax's whole value proposition, and a retried call carrying the
+        # same key gets the original task back rather than a second effect.
+        task_params = params.get("task") or {}
         ttl_ms = task_params.get("ttlMs")
         envelope = self.protocol.create_augmented(
             name,
@@ -208,12 +236,18 @@ class HapaxServer:
     def _tasks_get(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.protocol.get(params["taskId"])
 
-    def _tasks_list(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "tasks": [
-                self.protocol.get(t.id) for t in self.store.list_tasks()
-            ]
-        }
+    def _tasks_update(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`tasks/update`: acknowledge input responses.
+
+        Hapax never sets `input_required` (that loop is out of scope, and says
+        so), so there is never an outstanding inputRequest key — and the spec
+        directs a server to *ignore* responses to keys that are not
+        outstanding, not to error on them. What must still be real is the
+        existence check: an unknown taskId is an error, and get_task raising
+        TaskNotFound is what produces it.
+        """
+        self.store.get_task(params["taskId"])
+        return {}
 
     def _tasks_cancel(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.protocol.cancel(params["taskId"])

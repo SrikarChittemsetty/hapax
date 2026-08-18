@@ -17,12 +17,22 @@ import time
 import pytest
 
 from hapax.memory import InMemoryTaskStore
-from hapax.server import HapaxServer, Tool
+from hapax.server import TASKS_EXTENSION, HapaxServer, Tool
 from hapax.task import TaskState
 
 
 def rpc(method: str, params: dict | None = None, req_id: int | str = 1) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
+
+
+# What a task-capable client sends at initialize. Creation is server-directed
+# in the finalized extension: this declaration is the one and only opt-in, and
+# without it the server MUST answer tools/call inline.
+TASKS_CAP = {"capabilities": {"extensions": {TASKS_EXTENSION: {}}}}
+
+
+def negotiate(server) -> None:
+    server.handle(rpc("initialize", TASKS_CAP, req_id="init"))
 
 
 @pytest.fixture
@@ -51,12 +61,11 @@ def server(calls):
 
 def test_initialize_advertises_the_tasks_extension(server):
     result = server.handle(rpc("initialize"))["result"]
-    assert result["protocolVersion"]
+    assert result["protocolVersion"] == "2026-07-28"
     assert result["serverInfo"]["name"] == "hapax"
-    # Without this a client has no way to know it may ask for a task.
-    tasks = result["capabilities"]["experimental"]["tasks"]
-    assert "tools/call" in tasks["requests"]
-    assert tasks["cancel"] is True
+    # The finalized design keys everything on the extension id in the
+    # capabilities object — no experimental namespace, no method list.
+    assert TASKS_EXTENSION in result["capabilities"]["extensions"]
 
 
 def test_tools_list(server):
@@ -65,19 +74,23 @@ def test_tools_list(server):
     assert tools[0]["inputSchema"]["type"] == "object"
 
 
-def test_ordinary_call_runs_inline_and_returns_content(server, calls):
+def test_a_client_that_never_negotiated_gets_its_result_inline(server, calls):
+    # No initialize, or an initialize without the extension: either way the
+    # server MUST NOT return a task envelope. Even an explicit legacy `task`
+    # parameter cannot opt in — the capability declaration is the only door.
     result = server.handle(
-        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}})
+        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}, "task": {}})
     )["result"]
     assert calls == [{"value": "hi"}]
     assert json.loads(result["content"][0]["text"]) == {"echoed": "hi"}
-    # No task was created for a plain call.
+    # No task was created for a non-negotiated call.
     assert server.store.list_tasks() == []
 
 
-def test_task_augmented_call_returns_a_task_envelope(server):
+def test_a_negotiated_call_returns_a_task_envelope(server):
+    negotiate(server)
     result = server.handle(
-        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}, "task": {}})
+        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}})
     )["result"]
     assert result["resultType"] == "task"
     assert result["taskId"].startswith("task_")
@@ -85,8 +98,9 @@ def test_task_augmented_call_returns_a_task_envelope(server):
 
 
 def test_the_result_comes_back_from_tasks_get(server):
+    negotiate(server)
     created = server.handle(
-        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}, "task": {}})
+        rpc("tools/call", {"name": "echo", "arguments": {"value": "hi"}})
     )["result"]
     got = server.handle(rpc("tasks/get", {"taskId": created["taskId"]}))["result"]
     assert got["status"] == "completed"
@@ -95,6 +109,7 @@ def test_the_result_comes_back_from_tasks_get(server):
 
 
 def test_a_retried_call_with_the_same_key_does_not_run_the_tool_twice(server, calls):
+    negotiate(server)
     request = rpc(
         "tools/call",
         {"name": "echo", "arguments": {"value": "hi"}, "task": {"idempotencyKey": "k1"}},
@@ -113,24 +128,52 @@ def test_a_failing_tool_fails_its_task_not_the_server():
 
     tool = Tool("boom", "Always fails.", {"type": "object"}, explode)
     server = HapaxServer(InMemoryTaskStore(), tools=[tool], run_in_background=False)
+    negotiate(server)
 
-    created = server.handle(rpc("tools/call", {"name": "boom", "task": {}}))["result"]
+    created = server.handle(rpc("tools/call", {"name": "boom"}))["result"]
     got = server.handle(rpc("tasks/get", {"taskId": created["taskId"]}))["result"]
     assert got["status"] == "failed"
     assert "tool blew up" in got["error"]["message"]
 
 
-def test_cancel_and_list(server):
-    created = server.handle(
-        rpc("tools/call", {"name": "echo", "arguments": {"value": "x"}, "task": {}})
-    )["result"]
-    listed = server.handle(rpc("tasks/list"))["result"]["tasks"]
-    assert [t["taskId"] for t in listed] == [created["taskId"]]
+def test_tasks_list_is_gone(server):
+    # Removed in the finalized extension: a server cannot scope a listing to a
+    # caller, so serving one is an information leak. It must be method-not-
+    # found, exactly as if it had never existed.
+    assert server.handle(rpc("tasks/list"))["error"]["code"] == -32601
 
-    # Already completed (inline), so cancelling is an illegal transition and the
-    # server reports it as a bad request rather than a crash.
-    err = server.handle(rpc("tasks/cancel", {"taskId": created["taskId"]}))["error"]
-    assert err["code"] == -32602
+
+def test_cancelling_a_finished_task_is_an_ack_not_an_error(server):
+    negotiate(server)
+    created = server.handle(
+        rpc("tools/call", {"name": "echo", "arguments": {"value": "x"}})
+    )["result"]
+
+    # The work finished (inline) before the cancel arrived — the spec's
+    # cooperative model says that is a legitimate outcome, not a bad request.
+    # The ack is empty; the truth is in tasks/get.
+    assert server.handle(rpc("tasks/cancel", {"taskId": created["taskId"]}))["result"] == {}
+    got = server.handle(rpc("tasks/get", {"taskId": created["taskId"]}))["result"]
+    assert got["status"] == "completed"
+
+
+def test_tasks_update_acks_known_and_rejects_unknown(server):
+    negotiate(server)
+    created = server.handle(
+        rpc("tools/call", {"name": "echo", "arguments": {"value": "x"}})
+    )["result"]
+
+    # Hapax never surfaces inputRequests, and the spec directs servers to
+    # ignore responses to keys that are not outstanding — so a well-formed
+    # update on a real task is an empty ack.
+    ok = server.handle(rpc(
+        "tasks/update",
+        {"taskId": created["taskId"], "inputResponses": {"never-issued": {}}},
+    ))
+    assert ok["result"] == {}
+
+    err = server.handle(rpc("tasks/update", {"taskId": "task_missing", "inputResponses": {}}))
+    assert err["error"]["code"] == -32001
 
 
 def test_cancelling_a_pending_task_works():
@@ -200,7 +243,7 @@ def test_a_task_outlives_the_server_that_created_it(pg_store, pg_conninfo, ledge
     """
     proc = _spawn(pg_conninfo)
     try:
-        _send(proc, rpc("initialize", req_id="a"))
+        _send(proc, rpc("initialize", TASKS_CAP, req_id="a"))
         created = _send(proc, rpc(
             "tools/call",
             {"name": "charge",
@@ -225,7 +268,7 @@ def test_a_task_outlives_the_server_that_created_it(pg_store, pg_conninfo, ledge
 
     survivor = _spawn(pg_conninfo)
     try:
-        _send(survivor, rpc("initialize", req_id="a"))
+        _send(survivor, rpc("initialize", TASKS_CAP, req_id="a"))
         got = _send(survivor, rpc("tasks/get", {"taskId": task_id}, req_id="d"))["result"]
         assert got["status"] == "completed"
         assert json.loads(got["result"]["content"][0]["text"])["charged"] == 50
@@ -246,8 +289,9 @@ def test_a_running_task_is_not_claimable_until_the_server_stops_renewing(pg_stor
 
     tool = Tool("slow", "Takes a moment.", {"type": "object"}, lambda a: {"ok": True})
     server = HapaxServer(pg_store, tools=[tool], run_in_background=False, lease_seconds=60)
+    negotiate(server)
 
-    created = server.handle(rpc("tools/call", {"name": "slow", "task": {}}))["result"]
+    created = server.handle(rpc("tools/call", {"name": "slow"}))["result"]
 
     # It ran inline and is terminal, so it is unclaimable for the strongest
     # reason; the lease is what covers the window before that.

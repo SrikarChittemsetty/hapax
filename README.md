@@ -244,12 +244,19 @@ export HAPAX_TEST_DATABASE_URL="host=127.0.0.1 port=5432 user=postgres dbname=md
 
 There is an actual server. `python -m hapax.server --conninfo "…"` speaks
 JSON-RPC 2.0 over stdio — `initialize`, `tools/list`, `tools/call`, `tasks/get`,
-`tasks/list`, `tasks/cancel` — with every task living in Postgres instead of a
-dictionary that dies with the process:
+`tasks/update`, `tasks/cancel`, the surface of the finalized
+`io.modelcontextprotocol/tasks` extension (2026-07-28 spec) — with every task
+living in Postgres instead of a dictionary that dies with the process.
+
+Task creation is server-directed, as the final design requires: the client
+declares the extension once at `initialize`, and the server decides per-request
+whether to answer inline or with a task envelope. (`tasks/list` existed in the
+2025-11-25 experimental design and was removed in the redesign — a server can't
+scope a listing to a caller — so Hapax doesn't serve it.)
 
 ```
-→ {"method":"initialize"}
-← {"serverInfo":{"name":"hapax"},"capabilities":{"experimental":{"tasks":{...}}}}
+→ {"method":"initialize","params":{"capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}}
+← {"serverInfo":{"name":"hapax"},"capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}
 
 → {"method":"tools/call","params":{"name":"charge","arguments":{"customer":"demo","amount":50},
                                    "task":{"idempotencyKey":"demo-1"}}}
@@ -258,6 +265,12 @@ dictionary that dies with the process:
 → (the identical request again, as a retrying client would send it)
 ← {"resultType":"task","taskId":"task_cbbf8ac…","status":"working"}     ← same task
 ```
+
+One spec requirement Hapax meets by construction: a server must not return a
+task envelope until the task is durable enough that a `tasks/get` for it would
+already succeed. Every Hapax task is a committed Postgres row before the
+envelope exists — durability isn't a step that could be skipped, it's where
+tasks come from.
 
 An ordinary `tools/call` blocks until the tool returns. A **task-augmented** one
 returns a task id immediately and runs the work off the request path, so the
