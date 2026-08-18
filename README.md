@@ -211,7 +211,11 @@ cd bench/go && go run . --conninfo "postgres://user@127.0.0.1:5432/mdt" --tasks 
 
 Go is faster everywhere — 1.4–2.4× throughput, roughly half the claim latency — **and both peak at exactly the same place, 8 workers.** That is the interesting part: Go raises the ceiling and leaves the shape alone. If the limit had been client-side, a client with no interpreter and no GIL would have pushed the peak further right; it didn't, which independently corroborates that the wall is the commit path inside Postgres. Full tables, tail-latency comparison and caveats — including that this is two runtimes' concurrency models rather than a controlled single-variable experiment — in [`bench/RESULTS.md`](bench/RESULTS.md).
 
-Peak is ~5,200 tasks/s (Python) at 8 workers; past that, throughput falls and the tail collapses. Writing this benchmark is what found the worst bug in the project — every claim was sequentially scanning and sorting the entire queue, because the index was on the filter column instead of the sort key. Fixing it took a claim from **1.808 ms to 0.113 ms** and peak throughput from 2,950 to 4,950 tasks/s. Full diagnosis, including what the ceiling turned out to be and the three candidates that were ruled out with evidence, is in [`bench/RESULTS.md`](bench/RESULTS.md).
+Peak is **5,202 tasks/s (Python) at 8 workers**; past that, throughput falls and the tail collapses.
+
+Writing this benchmark is what found the worst bug in the project — every claim was sequentially scanning and sorting the entire queue, because the index was on the filter column instead of the sort key. Fixing it took a claim from **1.808 ms to 0.113 ms**, and peak throughput from 2,950 to 4,950 tasks/s.
+
+Those two peak figures are from different runs and both are real: the 4,950 was the before/after pair for the index fix, measured at median-of-3, where the peak landed at 4 workers. The 5,202 is from the later Go-vs-Python comparison at median-of-5, where the peak moved to 8. Median-of-3 was too noisy to locate the peak — that is itself a finding, and it is why every number in the Go comparison is a median of five. Full diagnosis, including what the ceiling turned out to be and the three candidates ruled out with evidence, is in [`bench/RESULTS.md`](bench/RESULTS.md).
 
 **Comparative correctness** — this system vs. the naive alternative (application-level check-then-insert) under a retry storm of N simultaneous same-key requests. Duplicate charges scale as ≈ N−1 for the naive approach; this system is exactly-once at every level:
 
