@@ -37,7 +37,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: pip install -e ".[dev,postgres]"
+        # otel is included so mypy can resolve the telemetry imports. The extra
+        # is optional at runtime — telemetry.py no-ops without it, and
+        # test_telemetry.py importorskips — but mypy cannot type-check an
+        # import it is unable to find, so CI must have it installed.
+        run: pip install -e ".[dev,postgres,otel]"
 
       - name: Type-check
         run: mypy src/hapax
